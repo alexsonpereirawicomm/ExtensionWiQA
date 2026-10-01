@@ -3,8 +3,11 @@ import {
   QaApiError,
   publicConfig,
   rebaseStorageUrl,
+  renewWiflowSession,
+  requestWiflowLoginCode,
   sanitizeConfig,
   uploadToSignedUrl,
+  validateWiflowLoginCode,
   verifyClientAccessPassword,
 } from '../shared/api-client.js';
 import {
@@ -22,7 +25,7 @@ import {
 import { SUPABASE_ANON_KEY, SUPABASE_URL } from '../shared/config.js';
 
 const OFFSCREEN_PATH = 'offscreen/offscreen.html';
-const BACKGROUND_PROTOCOL_VERSION = 7;
+const BACKGROUND_PROTOCOL_VERSION = 8;
 // Chaves deixadas pelo ditado por voz, que foi removido da extensão.
 const REMOVED_AUDIO_STORAGE_KEYS = ['wiqaTranscriptionState', 'wiqaVoiceConsent'];
 // Capturas em telas HiDPI passam de 5000px de largura; 2560px no maior lado
@@ -39,6 +42,10 @@ const VIEWPORT_PRESETS = Object.freeze({
   design: { label: 'Design' },
 });
 const DESIGN_VIEWPORT_LIMITS = Object.freeze({ minWidth: 240, maxWidth: 2560, minHeight: 200, maxHeight: 2560 });
+// Todas as abas gravam o mesmo objeto em storage.session (STORAGE_KEYS.DIAGNOSTICS);
+// uma fila por aba deixava duas abas lerem e regravarem o store ao mesmo tempo,
+// e a última escrita apagava o elemento recém-selecionado da outra. Uma fila só.
+const DIAGNOSTIC_STORE_QUEUE = 'store';
 const diagnosticQueues = new Map();
 const diagnosticDraftIds = new Map();
 const networkRequests = new Map();
@@ -134,6 +141,8 @@ async function dispatchMessage(message, sender) {
       return getContext();
     case 'WI_QA_VALIDATE_CONFIG':
       return validateAndSaveConfig(message.payload?.config || message.config || message.payload || {});
+    case 'WI_QA_REQUEST_LOGIN_CODE':
+      return requestLoginCode(message.payload?.email);
     case 'WI_QA_DISCONNECT':
       return disconnectProject();
     case 'WI_QA_SAVE_DRAFT':
@@ -153,7 +162,9 @@ async function dispatchMessage(message, sender) {
       return takeScreenshot();
     case 'WI_QA_SAVE_SCREENSHOT':
     case 'saveCropResult':
-      return saveScreenshot(message.dataUrl || message.payload?.dataUrl, sender);
+      return saveScreenshot(message.dataUrl || message.payload?.dataUrl, sender, {
+        filePrefix: message.payload?.filePrefix === 'elemento' ? 'elemento' : undefined,
+      });
     case 'WI_QA_VIDEO_START':
     case 'startRecording':
       return startVideoRecording(message);
@@ -242,7 +253,9 @@ async function getContext() {
   const diagnostics = tab?.id ? await getDiagnosticBundle(tab.id, false) : null;
   const config = stored[STORAGE_KEYS.CONFIG] || null;
   const activeDraftId = stored[STORAGE_KEYS.DRAFT]?.draftId || stored[STORAGE_KEYS.DRAFT]?.id || '';
-  const visibleDiagnostics = diagnostics && (!diagnostics.draftId || diagnostics.draftId === activeDraftId)
+  // Sem rascunho salvo ainda (o painel grava com debounce) não dá para julgar;
+  // o painel filtra pelo próprio draftId em applyContext.
+  const visibleDiagnostics = diagnostics && (!diagnostics.draftId || !activeDraftId || diagnostics.draftId === activeDraftId)
     ? diagnostics
     : null;
 
@@ -272,9 +285,40 @@ function withFixedConnection(rawConfig) {
   return { ...rawConfig, supabaseUrl: SUPABASE_URL, supabaseKey: SUPABASE_ANON_KEY };
 }
 
+async function requestLoginCode(email) {
+  const normalized = String(email || '').trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) {
+    throw new QaApiError('Informe um e-mail válido.', { code: 'INVALID_EMAIL', retryable: false });
+  }
+  const message = await requestWiflowLoginCode(SUPABASE_URL, SUPABASE_ANON_KEY, normalized);
+  return { success: true, message };
+}
+
 async function validateAndSaveConfig(rawConfig) {
+  // O código do e-mail vira sessão WiFlow antes da validação normal da config,
+  // que exige sessionToken + userId no modo wiflow.
+  if (rawConfig.authMode === 'wiflow' && rawConfig.loginCode) {
+    const login = await validateWiflowLoginCode(
+      SUPABASE_URL,
+      SUPABASE_ANON_KEY,
+      rawConfig.loginEmail,
+      rawConfig.loginCode,
+    );
+    rawConfig = {
+      ...rawConfig,
+      sessionToken: login.sessionToken,
+      wiflowSessionToken: login.sessionToken,
+      userId: login.user.id,
+      wiflowUserId: login.user.id,
+      wiflowEmail: login.user.email || rawConfig.loginEmail,
+      wiflowIssuedAt: new Date().toISOString(),
+      authorName: login.user.name || rawConfig.authorName || '',
+      authorEmail: login.user.email || rawConfig.authorEmail || '',
+    };
+  }
+
   const config = sanitizeConfig(withFixedConnection(rawConfig));
-  
+
   if (config.authMode === 'client' && rawConfig.clientPassword) {
     // Tenta gerar o token de sessão do convidado
     const session = await verifyClientAccessPassword(config.supabaseUrl, config.supabaseKey, rawConfig.clientPassword);
@@ -862,8 +906,11 @@ async function removeMedia(recordingId) {
   return { success: true, media };
 }
 
-function sessionExpiredError() {
-  return new QaApiError('Sua sessão expirou. Informe a senha novamente para continuar.', {
+function sessionExpiredError(config) {
+  const message = config?.authMode === 'wiflow'
+    ? 'Sua sessão expirou. Entre novamente com seu e-mail para continuar.'
+    : 'Sua sessão expirou. Informe a senha novamente para continuar.';
+  return new QaApiError(message, {
     status: 401,
     code: 'SESSION_EXPIRED',
     retryable: false,
@@ -871,7 +918,8 @@ function sessionExpiredError() {
 }
 
 function isClientSessionExpired(config) {
-  if (!config || config.authMode === 'wiflow') return false;
+  if (!config) return false;
+  if (config.authMode === 'wiflow') return !config.sessionToken;
   if (!config.clientAccessToken) return true;
   const expiresAt = Date.parse(config.clientAccessExpiresAt || '');
   return Number.isFinite(expiresAt) && expiresAt <= Date.now();
@@ -892,8 +940,12 @@ async function handleAuthFailure(error) {
     await chrome.storage.local.set({
       [STORAGE_KEYS.CONFIG]: { ...config, clientAccessToken: '', clientAccessExpiresAt: '' },
     });
+  } else if (config.authMode === 'wiflow' && config.sessionToken) {
+    await chrome.storage.local.set({
+      [STORAGE_KEYS.CONFIG]: { ...config, sessionToken: '', wiflowIssuedAt: '' },
+    });
   }
-  const expired = error.code === 'SESSION_EXPIRED' ? error : sessionExpiredError();
+  const expired = error.code === 'SESSION_EXPIRED' ? error : sessionExpiredError(config);
   await broadcast('WI_QA_SESSION_EXPIRED', errorPayload(expired));
   return expired;
 }
@@ -908,8 +960,24 @@ async function requireConfig() {
       retryable: false,
     });
   }
-  if (isClientSessionExpired(config)) throw sessionExpiredError();
-  return sanitizeConfig(withFixedConnection(config));
+  if (isClientSessionExpired(config)) throw sessionExpiredError(config);
+  return sanitizeConfig(withFixedConnection(await renewWiflowSessionIfStale(config)));
+}
+
+// Mesma regra do WiControl web: renova a sessão WiFlow na metade da validade.
+const WIFLOW_RENEW_AFTER_MS = 12 * 60 * 60 * 1000;
+
+async function renewWiflowSessionIfStale(config) {
+  if (config.authMode !== 'wiflow') return config;
+  const issuedAt = Date.parse(config.wiflowIssuedAt || '');
+  if (Number.isFinite(issuedAt) && Date.now() - issuedAt < WIFLOW_RENEW_AFTER_MS) return config;
+
+  const renewed = await renewWiflowSession(SUPABASE_URL, SUPABASE_ANON_KEY, config.sessionToken, config.userId);
+  if (!renewed) return config;
+
+  const next = { ...config, sessionToken: renewed.sessionToken, wiflowIssuedAt: new Date().toISOString() };
+  await chrome.storage.local.set({ [STORAGE_KEYS.CONFIG]: next });
+  return next;
 }
 
 function normalizeDraft(raw = {}) {
@@ -1043,7 +1111,7 @@ async function getDiagnosticBundle(tabId, create = true, draftId = '') {
 
 async function appendDiagnosticEvent(tabId, event, options = {}) {
   if (!Number.isInteger(tabId) || !event || typeof event !== 'object') return { success: true };
-  const previous = diagnosticQueues.get(tabId) || Promise.resolve();
+  const previous = diagnosticQueues.get(DIAGNOSTIC_STORE_QUEUE) || Promise.resolve();
   const task = previous.catch(() => undefined).then(async () => {
     const store = await diagnosticStore();
     const key = String(tabId);
@@ -1085,12 +1153,12 @@ async function appendDiagnosticEvent(tabId, event, options = {}) {
     await broadcast('WI_QA_DIAGNOSTICS_UPDATED', diagnosticView(bundle));
     return bundle;
   });
-  diagnosticQueues.set(tabId, task);
+  diagnosticQueues.set(DIAGNOSTIC_STORE_QUEUE, task);
   try {
     const bundle = await task;
     return { success: true, diagnostics: bundle ? diagnosticView(bundle) : null };
   } finally {
-    if (diagnosticQueues.get(tabId) === task) diagnosticQueues.delete(tabId);
+    if (diagnosticQueues.get(DIAGNOSTIC_STORE_QUEUE) === task) diagnosticQueues.delete(DIAGNOSTIC_STORE_QUEUE);
   }
 }
 
@@ -1100,6 +1168,7 @@ function diagnosticView(bundle) {
   const networkFailures = bundle.network.filter((entry) => Number(entry.status || 0) >= 400 || entry.error).length;
   return {
     active: true,
+    tabId: bundle.tabId,
     draftId: bundle.draftId || '',
     consoleCount: bundle.console.length,
     consoleErrors,
@@ -1173,7 +1242,7 @@ async function startActiveDiagnostics(draftId) {
 
 async function startDiagnostics(tabId, draftId, options = {}) {
   if (!Number.isInteger(tabId) || !draftId) return { success: true, diagnostics: null };
-  const previous = diagnosticQueues.get(tabId) || Promise.resolve();
+  const previous = diagnosticQueues.get(DIAGNOSTIC_STORE_QUEUE) || Promise.resolve();
   const task = previous.catch(() => undefined).then(async () => {
     const store = await diagnosticStore();
     const key = String(tabId);
@@ -1191,12 +1260,12 @@ async function startDiagnostics(tabId, draftId, options = {}) {
     }).catch(() => undefined);
     return bundle;
   });
-  diagnosticQueues.set(tabId, task);
+  diagnosticQueues.set(DIAGNOSTIC_STORE_QUEUE, task);
   try {
     const bundle = await task;
     return { success: true, diagnostics: diagnosticView(bundle) };
   } finally {
-    if (diagnosticQueues.get(tabId) === task) diagnosticQueues.delete(tabId);
+    if (diagnosticQueues.get(DIAGNOSTIC_STORE_QUEUE) === task) diagnosticQueues.delete(DIAGNOSTIC_STORE_QUEUE);
   }
 }
 
@@ -1461,7 +1530,7 @@ async function captureTabImage(tab) {
 
 async function clearDiagnostics(tabId, options = {}) {
   if (!Number.isInteger(tabId)) return null;
-  const previous = diagnosticQueues.get(tabId) || Promise.resolve();
+  const previous = diagnosticQueues.get(DIAGNOSTIC_STORE_QUEUE) || Promise.resolve();
   const task = previous.catch(() => undefined).then(async () => {
     const store = await diagnosticStore();
     const key = String(tabId);
@@ -1483,11 +1552,11 @@ async function clearDiagnostics(tabId, options = {}) {
     else diagnosticDraftIds.delete(tabId);
     return next;
   });
-  diagnosticQueues.set(tabId, task);
+  diagnosticQueues.set(DIAGNOSTIC_STORE_QUEUE, task);
   try {
     return await task;
   } finally {
-    if (diagnosticQueues.get(tabId) === task) diagnosticQueues.delete(tabId);
+    if (diagnosticQueues.get(DIAGNOSTIC_STORE_QUEUE) === task) diagnosticQueues.delete(DIAGNOSTIC_STORE_QUEUE);
   }
 }
 

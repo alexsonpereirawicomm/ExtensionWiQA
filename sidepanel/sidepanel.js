@@ -9,6 +9,7 @@
  * Solicitações:
  *   WI_QA_GET_CONTEXT
  *   WI_QA_VALIDATE_CONFIG       payload: { config }
+ *   WI_QA_REQUEST_LOGIN_CODE    payload: { email }
  *   WI_QA_CAPTURE_SCREENSHOT    payload: { draftId, sessionId }
  *   WI_QA_VIDEO_START|PAUSE|RESUME|STOP|CANCEL
  *   WI_QA_MEDIA_REMOVE          payload: { mediaId, recordingId }
@@ -25,10 +26,11 @@
 (() => {
   'use strict';
 
-  const REQUIRED_BACKGROUND_PROTOCOL = 7;
+  const REQUIRED_BACKGROUND_PROTOCOL = 8;
   const MESSAGE = Object.freeze({
     GET_CONTEXT: 'WI_QA_GET_CONTEXT',
     VALIDATE_CONFIG: 'WI_QA_VALIDATE_CONFIG',
+    REQUEST_LOGIN_CODE: 'WI_QA_REQUEST_LOGIN_CODE',
     SCREENSHOT: 'WI_QA_CAPTURE_SCREENSHOT',
     VIDEO_START: 'WI_QA_VIDEO_START',
     VIDEO_STOP: 'WI_QA_VIDEO_STOP',
@@ -85,6 +87,9 @@
     ]
   });
 
+  // Mesmo valor do placeholder em sidepanel.html.
+  const GUEST_CREDENTIAL_EXAMPLE = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890$SuaSenha@2026';
+
   const dom = {};
   const state = {
     initialized: false,
@@ -99,6 +104,11 @@
     diagnostics: null,
     submitting: false,
     setupBusy: false,
+    // Login por e-mail: 'email' até o código ser enviado, depois 'code'.
+    loginStep: 'email',
+    loginCodeEmail: '',
+    // Imagem do elemento anexada sozinha na seleção atual.
+    autoPreviewRecordingId: '',
     draftSaveTimer: null,
     timerInterval: null,
     objectUrls: new Map(),
@@ -188,7 +198,9 @@
   function cacheDom() {
     const ids = [
       'connectionBadge', 'connectionLabel', 'btnSettings', 'setupView', 'setupForm',
-      'setupTitle', 'projectToken',
+      'setupTitle', 'setupIntroText', 'projectToken', 'projectTokenField',
+      'guestCredential', 'guestCredentialHint', 'loginEmail', 'loginCodeField', 'loginCode',
+      'loginCodeHint', 'btnResendCode',
       'clientAuthFields', 'wiflowAuthFields', 'clientPassword', 'wiflowSessionToken',
       'wiflowUserId', 'setupError', 'btnCancelSetup', 'btnConnect', 'connectButtonLabel',
       'connectSpinner', 'workspaceView', 'projectName', 'btnRefreshContext', 'pageDomain',
@@ -225,8 +237,26 @@
     dom.btnCopyUrl.addEventListener('click', () => copyText(dom.pageUrl.value, 'URL copiada.'));
 
     document.querySelectorAll('input[name="authMode"]').forEach((radio) => {
-      radio.addEventListener('change', updateAuthModeFields);
+      radio.addEventListener('change', () => {
+        clearSetupError();
+        updateAuthModeFields();
+      });
     });
+    dom.guestCredential.addEventListener('input', applyGuestCredential);
+    // O botão "Copiar token" do WiControl copia token$senha; no login por
+    // e-mail só o token interessa.
+    dom.projectToken.addEventListener('input', () => {
+      if (selectedAuthMode() !== 'wiflow' || !dom.projectToken.value.includes('$')) return;
+      dom.projectToken.value = tokenBeforeSeparator(dom.projectToken.value);
+    });
+    dom.loginEmail.addEventListener('input', () => {
+      // Trocar o e-mail invalida o código já pedido.
+      if (state.loginStep === 'code' && normalizeEmail(dom.loginEmail.value) !== state.loginCodeEmail) {
+        setLoginStep('email');
+      }
+      updateConnectButtonLabel();
+    });
+    dom.btnResendCode.addEventListener('click', () => requestLoginCode());
 
     document.querySelectorAll('[data-toggle-password]').forEach((button) => {
       button.addEventListener('click', () => togglePassword(button));
@@ -309,6 +339,12 @@
       return;
     }
 
+    // Primeiro envio no modo e-mail só pede o código; o segundo conecta.
+    if (config.authMode === 'wiflow' && needsLoginCode(config)) {
+      await requestLoginCode();
+      return;
+    }
+
     setSetupBusy(true);
     setConnectionState('busy', 'Validando');
 
@@ -318,6 +354,10 @@
 
       const context = response.context || response.data || response.payload || response;
       state.config = mergeConfig(config, context.config);
+      delete state.config.loginCode;
+      dom.guestCredential.value = '';
+      dom.loginCode.value = '';
+      setLoginStep('email');
       state.project = context.project || (context.snapshot && context.snapshot.project) || response.project || null;
       state.members = context.memberDirectory || (context.snapshot && context.snapshot.memberDirectory) || response.memberDirectory || null;
       state.connected = Boolean(state.project);
@@ -353,19 +393,29 @@
   function readSetupConfig() {
     const mode = selectedAuthMode();
     const previous = state.config || {};
+    if (mode === 'client') applyGuestCredential();
     const clientInput = dom.clientPassword ? dom.clientPassword.value.trim() : '';
-    const sessionInput = dom.wiflowSessionToken.value.trim();
+    const loginEmail = normalizeEmail(dom.loginEmail.value);
+    const loginCode = mode === 'wiflow' && state.loginStep === 'code' ? dom.loginCode.value.trim() : '';
+    // A sessão WiFlow salva só vale para o mesmo e-mail e enquanto não venceu.
+    const reuseWiflowSession = mode === 'wiflow'
+      && state.loginStep !== 'code'
+      && !state.sessionExpired
+      && Boolean(loginEmail)
+      && loginEmail === normalizeEmail(previous.wiflowEmail);
 
     const config = {
-      projectToken: dom.projectToken.value.trim() || unmaskedValue(previous.projectToken || previous.token),
+      projectToken: tokenBeforeSeparator(dom.projectToken.value) || unmaskedValue(previous.projectToken || previous.token),
       authMode: mode,
       clientPassword: mode === 'client' ? clientInput : '',
       // Reaproveita o token salvo, exceto quando ele já venceu.
       clientAccessToken: state.sessionExpired ? '' : (previous.clientAccessToken || ''),
-      wiflowSessionToken: mode === 'wiflow'
-        ? (sessionInput || unmaskedValue(previous.wiflowSessionToken || previous.sessionToken))
+      loginEmail: mode === 'wiflow' ? loginEmail : '',
+      loginCode,
+      wiflowSessionToken: reuseWiflowSession
+        ? (dom.wiflowSessionToken.value.trim() || unmaskedValue(previous.wiflowSessionToken || previous.sessionToken))
         : '',
-      wiflowUserId: mode === 'wiflow'
+      wiflowUserId: reuseWiflowSession
         ? (dom.wiflowUserId.value.trim() || unmaskedValue(previous.wiflowUserId || previous.userId))
         : ''
     };
@@ -378,17 +428,129 @@
   }
 
   function validateSetupConfig(config) {
+    if (config.authMode === 'client') {
+      if (!config.projectToken) return 'Informe o token e a senha no formato token$senha.';
+      if (!config.clientPassword && !config.clientAccessToken) {
+        return 'Informe a senha depois do $, no formato token$senha.';
+      }
+      return '';
+    }
+
     if (!config.projectToken) return 'Informe o token do projeto.';
-
-    if (config.authMode === 'client' && !config.clientPassword && !config.clientAccessToken) {
-      return 'Informe a senha de acesso de convidado.';
-    }
-
-    if (config.authMode === 'wiflow' && (!config.wiflowSessionToken || !config.wiflowUserId)) {
-      return 'Informe o token da sessão e o ID do usuário WiFlow.';
-    }
-
+    if (!isValidEmail(config.loginEmail)) return 'Informe um e-mail válido.';
+    if (state.loginStep === 'code' && !config.loginCode) return 'Informe o código enviado para o seu e-mail.';
     return '';
+  }
+
+  function needsLoginCode(config) {
+    return !config.loginCode && !(config.wiflowSessionToken && config.wiflowUserId);
+  }
+
+  async function requestLoginCode() {
+    if (state.setupBusy) return;
+    const email = normalizeEmail(dom.loginEmail.value);
+    if (!isValidEmail(email)) {
+      showSetupError('Informe um e-mail válido.');
+      dom.loginEmail.focus();
+      return;
+    }
+
+    clearSetupError();
+    setSetupBusy(true);
+    dom.btnResendCode.disabled = true;
+    try {
+      const response = await sendCommand(MESSAGE.REQUEST_LOGIN_CODE, { email }, { timeoutMs: 35000 });
+      if (!isSuccess(response)) throw responseError(response, 'Falha ao solicitar código de acesso.');
+      state.loginCodeEmail = email;
+      setLoginStep('code');
+      dom.loginCodeHint.textContent = response.message || 'Código enviado. Verifique seu e-mail.';
+      showToast('Código enviado para o seu e-mail.', 'success');
+      requestAnimationFrame(() => dom.loginCode.focus());
+    } catch (error) {
+      showSetupError(readableError(error));
+    } finally {
+      dom.btnResendCode.disabled = false;
+      setSetupBusy(false);
+    }
+  }
+
+  function setLoginStep(step) {
+    state.loginStep = step === 'code' ? 'code' : 'email';
+    if (state.loginStep === 'email') {
+      state.loginCodeEmail = '';
+      dom.loginCode.value = '';
+    }
+    dom.loginCodeField.classList.toggle('hidden', state.loginStep !== 'code');
+    updateConnectButtonLabel();
+  }
+
+  // Convidado: "token$senha" num único campo. Divide no primeiro $ (a senha
+  // pode conter $) e preenche os campos ocultos projectToken e clientPassword.
+  // Sem $, com um token já salvo, o valor inteiro é tratado como a senha.
+  function applyGuestCredential() {
+    const savedToken = unmaskedValue(state.config && (state.config.projectToken || state.config.token));
+    const parsed = parseGuestCredential(dom.guestCredential.value, savedToken);
+    if (parsed.token) dom.projectToken.value = parsed.token;
+    dom.clientPassword.value = parsed.password;
+
+    // A dica é opcional no HTML.
+    if (!dom.guestCredentialHint) return;
+    const raw = dom.guestCredential.value.trim();
+    let hint = 'Separe o token e a senha com $.';
+    let isError = false;
+    if (raw && parsed.token && parsed.password) {
+      hint = raw.includes('$')
+        ? `Token ${maskToken(parsed.token)} e senha identificados.`
+        : `Usando o token salvo ${maskToken(parsed.token)} com esta senha.`;
+    } else if (raw && hasGuestSession()) {
+      hint = `Token ${maskToken(parsed.token)} identificado; usando a sessão de convidado atual.`;
+    } else if (raw) {
+      hint = 'Falta a senha: use o formato token$senha.';
+      isError = true;
+    }
+    dom.guestCredentialHint.textContent = hint;
+    dom.guestCredentialHint.classList.toggle('is-error', isError);
+  }
+
+  function hasGuestSession() {
+    const config = state.config || {};
+    return Boolean(config.clientAccessToken || config.hasClientAccessToken) && !state.sessionExpired;
+  }
+
+  // Sem $: valor com formato de token (mesma regra do isValidToken da
+  // client-project-qa) é o token; senão, com token salvo, é a senha.
+  function parseGuestCredential(raw, savedToken) {
+    const value = String(raw || '').trim();
+    if (!value) return { token: '', password: '' };
+    const separator = value.indexOf('$');
+    if (separator === -1) {
+      if (looksLikeProjectToken(value) || !savedToken) return { token: value, password: '' };
+      return { token: savedToken, password: value };
+    }
+    return {
+      token: value.slice(0, separator).trim(),
+      password: value.slice(separator + 1).trim()
+    };
+  }
+
+  function looksLikeProjectToken(value) {
+    return value.length >= 32 && value.length <= 128 && /^[a-f0-9-]+$/i.test(value);
+  }
+
+  function tokenBeforeSeparator(value) {
+    return String(value || '').split('$')[0].trim();
+  }
+
+  function maskToken(token) {
+    return token.length > 12 ? `${token.slice(0, 6)}…${token.slice(-4)}` : token;
+  }
+
+  function normalizeEmail(value) {
+    return String(value || '').trim().toLowerCase();
+  }
+
+  function isValidEmail(value) {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || ''));
   }
 
   function populateSetupForm(config) {
@@ -404,10 +566,18 @@
     if (authRadio) authRadio.checked = true;
 
     dom.wiflowUserId.value = displayableValue(config.wiflowUserId || config.userId);
-    if (dom.clientPassword) {
-      setSecretPlaceholder(dom.clientPassword, '', config.hasClientAccessToken);
-    }
+    dom.loginEmail.value = config.wiflowEmail || dom.loginEmail.value || '';
     setSecretPlaceholder(dom.wiflowSessionToken, config.wiflowSessionToken || config.sessionToken, config.hasWiflowSessionToken || config.hasSessionToken);
+
+    // O token salvo permite digitar só a senha quando a sessão de convidado vence.
+    dom.clientPassword.value = '';
+    dom.guestCredential.value = '';
+    dom.guestCredential.placeholder = !config.projectToken
+      ? GUEST_CREDENTIAL_EXAMPLE
+      : hasGuestSession()
+        ?'Configurado — deixe vazio para manter'
+        : 'senha (token salvo) ou token$senha';
+    applyGuestCredential();
     updateAuthModeFields();
   }
 
@@ -424,6 +594,32 @@
     const wiflow = selectedAuthMode() === 'wiflow';
     dom.clientAuthFields.classList.toggle('hidden', wiflow);
     dom.wiflowAuthFields.classList.toggle('hidden', !wiflow);
+    // No modo convidado o token vem do campo token$senha.
+    dom.projectTokenField.classList.toggle('hidden', !wiflow);
+    dom.setupIntroText.innerHTML = wiflow
+      ? 'Informe o token do projeto e entre com o e-mail que tem acesso ao WiControl.'
+      : 'Cole o token do projeto e a senha de convidado no formato <code>token$senha</code>.';
+    updateConnectButtonLabel();
+  }
+
+  function updateConnectButtonLabel() {
+    if (state.setupBusy) return;
+    const waitingCode = selectedAuthMode() === 'wiflow'
+      && state.loginStep !== 'code'
+      && needsLoginCode(readWiflowSessionPreview());
+    dom.connectButtonLabel.textContent = waitingCode ? 'Enviar código' : 'Validar e conectar';
+  }
+
+  // Versão leve de readSetupConfig só para decidir o rótulo do botão.
+  function readWiflowSessionPreview() {
+    const previous = state.config || {};
+    const sameEmail = normalizeEmail(dom.loginEmail.value) === normalizeEmail(previous.wiflowEmail);
+    const canReuse = sameEmail && !state.sessionExpired && Boolean(normalizeEmail(dom.loginEmail.value));
+    return {
+      loginCode: '',
+      wiflowSessionToken: canReuse ? unmaskedValue(previous.wiflowSessionToken || previous.sessionToken) : '',
+      wiflowUserId: canReuse ? unmaskedValue(previous.wiflowUserId || previous.userId) : ''
+    };
   }
 
   function selectedAuthMode() {
@@ -935,18 +1131,34 @@
       : 'Prévia do elemento';
   }
 
-  async function attachElementPreview() {
+  // Ao selecionar, a prévia é anexada sozinha ({ auto: true }); trocar de
+  // elemento substitui a imagem anexada automaticamente da seleção anterior.
+  async function attachElementPreview({ auto = false } = {}) {
     const preview = state.diagnostics && state.diagnostics.elementPreview;
-    if (!preview || !preview.dataUrl) return;
+    if (!preview || !preview.dataUrl) return false;
     dom.btnAttachElement.disabled = true;
     try {
-      const response = await sendCommand('WI_QA_SAVE_SCREENSHOT', { dataUrl: preview.dataUrl }, { timeoutMs: 20000 });
+      if (auto) await removeAutoAttachedPreview();
+      const response = await sendCommand('WI_QA_SAVE_SCREENSHOT', {
+        dataUrl: preview.dataUrl,
+        filePrefix: 'elemento'
+      }, { timeoutMs: 20000 });
       if (!isSuccess(response)) throw responseError(response, 'Não foi possível anexar a prévia.');
-      showToast('Prévia do elemento anexada como imagem.', 'success');
+      if (auto) state.autoPreviewRecordingId = (response.media && response.media.recordingId) || '';
+      else showToast('Prévia do elemento anexada como imagem.', 'success');
+      return true;
     } catch (error) {
       dom.btnAttachElement.disabled = false;
       showToast(readableError(error), 'error');
+      return false;
     }
+  }
+
+  async function removeAutoAttachedPreview() {
+    const recordingId = state.autoPreviewRecordingId;
+    state.autoPreviewRecordingId = '';
+    if (!recordingId || !state.media.some((entry) => entry.recordingId === recordingId)) return;
+    await sendCommand(MESSAGE.MEDIA_REMOVE, { recordingId }, { timeoutMs: 8000 }).catch(() => undefined);
   }
 
   // --- Visualizador ampliado -------------------------------------------------
@@ -1035,7 +1247,8 @@
       if (!isSuccess(response)) throw responseError(response, 'Não foi possível selecionar o elemento.');
       state.diagnostics = response.diagnostics || state.diagnostics;
       renderDiagnostics();
-      showToast('Elemento associado ao relato.', 'success');
+      const attached = await attachElementPreview({ auto: true });
+      showToast(attached ? 'Elemento associado ao relato, com imagem anexada.' : 'Elemento associado ao relato.', 'success');
     } catch (error) {
       if (!/cancelad/i.test(String(error?.message || error)) && !handlePermissionError(error)) {
         showToast(readableError(error), 'error');
@@ -1288,6 +1501,7 @@
     state.draftId = makeId('draft');
     state.media = [];
     state.diagnostics = null;
+    state.autoPreviewRecordingId = '';
 
     dom.qaForm.reset();
     dom.device.value = VIEWPORT_DEVICE[state.viewport] || 'Desktop';
@@ -1415,6 +1629,9 @@
         break;
       case 'WI_QA_DIAGNOSTICS_UPDATED':
         if (payload && payload.draftId && payload.draftId !== state.draftId) break;
+        // Eventos de outras abas (e de iframes, que chegam sem draftId) não
+        // podem substituir o diagnóstico — e o elemento — da aba em uso.
+        if (payload && Number.isInteger(payload.tabId) && state.tab && payload.tabId !== state.tab.id) break;
         state.diagnostics = payload && payload.active ? payload : null;
         renderDiagnostics();
         break;
@@ -1609,7 +1826,13 @@
     dom.btnCancelSetup.classList.toggle('hidden', !allowCancel || !state.connected);
     dom.setupTitle.textContent = state.connected ? 'Configurações da conexão' : 'Conecte seu projeto';
     clearSetupError();
-    requestAnimationFrame(() => dom.projectToken.focus());
+    requestAnimationFrame(() => setupFocusTarget().focus());
+  }
+
+  function setupFocusTarget() {
+    if (selectedAuthMode() !== 'wiflow') return dom.guestCredential;
+    if (!dom.projectToken.value) return dom.projectToken;
+    return state.loginStep === 'code' ? dom.loginCode : dom.loginEmail;
   }
 
   function showWorkspace() {
@@ -1639,18 +1862,23 @@
     clearTimeout(state.sessionTimer);
     state.sessionTimer = null;
     state.sessionExpired = true;
-    if (state.config) state.config = { ...state.config, clientAccessToken: '' };
+    if (state.config) {
+      state.config = { ...state.config, clientAccessToken: '', wiflowSessionToken: '', sessionToken: '' };
+    }
+    const fallback = state.config && state.config.authMode === 'wiflow'
+      ? 'Sua sessão expirou. Entre novamente com seu e-mail para continuar.'
+      : 'Sua sessão expirou. Informe a senha novamente para continuar.';
     // Resposta e broadcast chegam juntos; reabrir a tela limparia a senha que
     // a pessoa já pode estar digitando.
     if (state.sessionPromptShown) {
-      showSetupError(message || 'Sua sessão expirou. Informe a senha novamente para continuar.');
+      showSetupError(message || fallback);
       return;
     }
     state.sessionPromptShown = true;
+    setLoginStep('email');
     showSetup(false);
-    showSetupError(message || 'Sua sessão expirou. Informe a senha novamente para continuar.');
+    showSetupError(message || fallback);
     setConnectionState('offline', 'Sessão expirada');
-    requestAnimationFrame(() => (dom.clientPassword || dom.projectToken).focus());
   }
 
   function sessionExpiresAt() {
@@ -1950,7 +2178,8 @@
     state.setupBusy = busy;
     dom.btnConnect.disabled = busy;
     dom.connectSpinner.classList.toggle('hidden', !busy);
-    dom.connectButtonLabel.textContent = busy ? 'Validando…' : 'Validar e conectar';
+    if (busy) dom.connectButtonLabel.textContent = 'Validando…';
+    else updateConnectButtonLabel();
   }
 
   function setSubmitBusy(busy) {

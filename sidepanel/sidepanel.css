@@ -450,6 +450,30 @@ input:disabled {
   line-height: 1.4;
 }
 
+.field-hint.is-error {
+  color: var(--wi-danger);
+}
+
+.link-button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--wi-brand-action);
+  font: inherit;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.link-button:hover {
+  text-decoration: underline;
+}
+
+.link-button:disabled {
+  color: var(--wi-muted-light);
+  cursor: default;
+  text-decoration: none;
+}
+
 .auth-fieldset {
   min-width: 0;
   margin: 0;

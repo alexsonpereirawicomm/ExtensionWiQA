@@ -41,6 +41,8 @@ export function sanitizeConfig(raw = {}) {
     clientAccessToken: String(raw.clientAccessToken || '').trim(),
     sessionToken: String(raw.sessionToken || raw.wiflowSessionToken || '').trim(),
     userId: String(raw.userId || raw.wiflowUserId || '').trim(),
+    wiflowEmail: String(raw.wiflowEmail || '').trim().toLowerCase(),
+    wiflowIssuedAt: String(raw.wiflowIssuedAt || '').trim(),
     clientAccessExpiresAt: String(raw.clientAccessExpiresAt || '').trim(),
     authorName: String(raw.authorName || '').trim(),
     authorEmail: String(raw.authorEmail || '').trim(),
@@ -99,6 +101,89 @@ export async function verifyClientAccessPassword(supabaseUrl, anonKey, password)
   return { token: body.token, expiresAt: body.expiresAt || '' };
 }
 
+// Login por e-mail: mesmo fluxo de código do WiControl web
+// (frontend/src/lib/wiflow-auth.ts), passando pela edge function wiflow-proxy.
+async function wiflowAuthRequest(supabaseUrl, anonKey, path, payload, fallbackError) {
+  const headers = {
+    apikey: anonKey,
+    'Content-Type': 'application/json',
+    'x-wiflow-path': path,
+  };
+  if (/^eyJ[A-Za-z0-9_-]+\./.test(anonKey)) {
+    headers.Authorization = `Bearer ${anonKey}`;
+  }
+
+  let response;
+  try {
+    response = await fetch(`${supabaseUrl}/functions/v1/wiflow-proxy`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+    });
+  } catch {
+    throw new QaApiError('Não foi possível falar com o WiFlow. Verifique sua conexão.', {
+      code: 'WIFLOW_NETWORK_ERROR',
+    });
+  }
+
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new QaApiError(body.error || fallbackError, {
+      status: response.status,
+      code: 'WIFLOW_AUTH_FAILED',
+      retryable: response.status >= 500,
+    });
+  }
+  return body;
+}
+
+export async function requestWiflowLoginCode(supabaseUrl, anonKey, email) {
+  const body = await wiflowAuthRequest(
+    supabaseUrl,
+    anonKey,
+    '/auth/request-token',
+    { email: String(email || '').trim().toLowerCase() },
+    'Falha ao solicitar código de acesso.',
+  );
+  return body.message || 'Código enviado. Verifique seu e-mail.';
+}
+
+export async function validateWiflowLoginCode(supabaseUrl, anonKey, email, code) {
+  const body = await wiflowAuthRequest(
+    supabaseUrl,
+    anonKey,
+    '/auth/validate-token',
+    { email: String(email || '').trim().toLowerCase(), code: String(code || '').trim() },
+    'Código inválido ou expirado.',
+  );
+  if (!body.sessionToken || !body.user?.id) {
+    throw new QaApiError(body.error || 'Código inválido ou expirado.', {
+      status: 401,
+      code: 'INVALID_LOGIN_CODE',
+      retryable: false,
+    });
+  }
+  return { sessionToken: body.sessionToken, user: body.user };
+}
+
+// Retorna null quando o WiFlow recusa a renovação; quem chama mantém a sessão
+// atual até ela vencer de fato.
+export async function renewWiflowSession(supabaseUrl, anonKey, sessionToken, userId) {
+  try {
+    const body = await wiflowAuthRequest(
+      supabaseUrl,
+      anonKey,
+      '/auth/renew-session',
+      { sessionToken, userId },
+      'Falha ao renovar a sessão.',
+    );
+    return body.newSessionToken ? { sessionToken: body.newSessionToken, user: body.user || null } : null;
+  } catch {
+    return null;
+  }
+}
+
 export function publicConfig(config = {}) {
   return {
     supabaseUrl: config.supabaseUrl || '',
@@ -112,6 +197,7 @@ export function publicConfig(config = {}) {
     wiflowSessionToken: config.sessionToken || config.wiflowSessionToken || '',
     userId: config.userId || '',
     wiflowUserId: config.userId || config.wiflowUserId || '',
+    wiflowEmail: config.wiflowEmail || '',
     clientAccessExpiresAt: config.clientAccessExpiresAt || '',
     authorName: config.authorName || '',
     authorEmail: config.authorEmail || '',

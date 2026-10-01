@@ -106,40 +106,62 @@
 										<div class="setup-intro">
 												<span class="eyebrow">Configuração segura</span>
 												<h1 id="setupTitle">Conecte seu projeto</h1>
-												<p>Informe o token do projeto e a senha de acesso.</p>
+												<p id="setupIntroText">Cole o token do projeto no formato
+														<code>token$senha</code>.
+												</p>
 										</div>
 
 										<form id="setupForm" class="setup-form" novalidate>
-												<div class="field">
-														<label for="projectToken">Token de compartilhamento do projeto</label>
-														<input id="projectToken" name="projectToken" type="text" placeholder="Cole o token do projeto" autocomplete="off" spellcheck="false" required>
-												</div>
-
-												<fieldset class="auth-fieldset hidden">
+												<fieldset class="auth-fieldset">
 														<legend>Modo de acesso</legend>
 														<div class="segmented-control">
 																<label>
 																		<input type="radio" name="authMode" value="client" checked>
-																		<span>Cliente</span>
+																		<span>Convidado</span>
+																</label>
+																<label>
+																		<input type="radio" name="authMode" value="wiflow">
+																		<span>E-mail</span>
 																</label>
 														</div>
 												</fieldset>
 
+												<!-- Convidado: um único campo "token$senha"; o painel separa e preenche projectToken e clientPassword. -->
 												<div id="clientAuthFields" class="auth-fields">
 														<div class="field">
-																<label for="clientPassword">Senha de Acesso (Convidado)</label>
+																<label for="guestCredential">Token</label>
 																<div class="password-field">
-																		<input id="clientPassword" name="clientPassword" type="password" autocomplete="off" spellcheck="false" placeholder="Senha do projeto">
-																		<button class="password-toggle" type="button" data-toggle-password="clientPassword" aria-label="Mostrar senha">
+																		<input id="guestCredential" name="guestCredential" type="password" autocomplete="off" spellcheck="false" placeholder="a1b2c3d4-e5f6-7890-abcd-ef1234567890$SuaSenha@2026">
+																		<button class="password-toggle" type="button" data-toggle-password="guestCredential" aria-label="Mostrar valor">
 																				<svg aria-hidden="true">
 																						<use href="#icon-eye"></use>
 																				</svg>
 																		</button>
 																</div>
+																<!-- <p id="guestCredentialHint" class="field-hint">Separe o token e a senha com <code>$</code>.</p> -->
 														</div>
+														<input id="clientPassword" name="clientPassword" type="hidden" value="">
 												</div>
 
+												<div id="projectTokenField" class="field hidden">
+														<label for="projectToken">Token de compartilhamento do projeto</label>
+														<input id="projectToken" name="projectToken" type="text" placeholder="Cole o token do projeto (token$senha também serve)" autocomplete="off" spellcheck="false">
+												</div>
+
+												<!-- E-mail: login com código enviado por e-mail, o mesmo do WiControl web. -->
 												<div id="wiflowAuthFields" class="auth-fields hidden">
+														<div class="field">
+																<label for="loginEmail">E-mail</label>
+																<input id="loginEmail" name="loginEmail" type="email" autocomplete="email" spellcheck="false" placeholder="voce@empresa.com.br">
+														</div>
+														<div id="loginCodeField" class="field hidden">
+																<label for="loginCode">Código de acesso</label>
+																<input id="loginCode" name="loginCode" type="text" inputmode="numeric" autocomplete="one-time-code" spellcheck="false" placeholder="Código recebido por e-mail">
+																<p class="field-hint">
+																		<span id="loginCodeHint">Enviamos um código para o seu e-mail.</span>
+																		<button id="btnResendCode" class="link-button" type="button">Reenviar código</button>
+																</p>
+														</div>
 														<input id="wiflowSessionToken" name="wiflowSessionToken" type="hidden" value="">
 														<input id="wiflowUserId" name="wiflowUserId" type="hidden" value="">
 												</div>
@@ -249,7 +271,8 @@
 																</svg></span>
 																<span class="view-tool-copy">
 																		<strong id="pixelInspectorLabel">Fiscal do Pixel</strong>
-																		<small id="pixelInspectorHint">Compare a página com o design. Verifique as fontes, cores e
+																		<small id="pixelInspectorHint">Compare a página com o design. Verifique as fontes, cores
+																				e
 																				tamanhos.</small>
 																</span>
 														</button>
