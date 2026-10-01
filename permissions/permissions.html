@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>Liberar acessos · WiControl QA</title>
+    <link rel="stylesheet" href="../sidepanel/sidepanel.css">
+    <link rel="stylesheet" href="permissions.css">
+  </head>
+  <body>
+    <main class="access-page">
+      <header class="access-header">
+        <span class="eyebrow">WiControl QA</span>
+        <h1>Liberar acessos</h1>
+        <p>A extensão só pede o que precisa para cada recurso. Clique em <strong>Liberar</strong> e confirme no aviso do Chrome — o botão certo aparece destacado nas ilustrações abaixo.</p>
+      </header>
+
+      <section class="access-card" id="card-site" data-access="site">
+        <div class="access-card-head">
+          <div>
+            <h2>Conexão com o projeto</h2>
+            <p>Permite enviar os itens de QA para o servidor do projeto (<span id="siteOrigin">Supabase</span>).</p>
+          </div>
+          <span class="access-status" data-status="checking">Verificando…</span>
+        </div>
+        <div class="access-body">
+          <div class="access-steps">
+            <ol>
+              <li>Clique em <strong>Liberar conexão</strong>.</li>
+              <li>No aviso do Chrome, clique em <strong>Permitir</strong>.</li>
+            </ol>
+            <div class="access-actions">
+              <button class="button button-primary button-small" type="button" data-action="grant-site">Liberar conexão</button>
+            </div>
+            <p class="access-note" data-when="missing">Conecte o projeto no painel primeiro; este acesso é pedido automaticamente na conexão.</p>
+          </div>
+          <figure class="prompt-mock" aria-hidden="true">
+            <div class="prompt-window">
+              <strong>“WiControl QA” quer permissão para:</strong>
+              <span>Ler e alterar seus dados em <em class="prompt-site">seu-projeto.supabase.co</em></span>
+              <div class="prompt-buttons"><span>Negar</span><span class="is-target">Permitir</span></div>
+            </div>
+            <figcaption>Aviso que o Chrome mostra</figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <section class="access-card" id="card-pages" data-access="pages">
+        <div class="access-card-head">
+          <div>
+            <h2>Acesso às páginas em teste</h2>
+            <p>Necessário para <strong>Screenshot</strong>, <strong>Selecionar elemento</strong> e para o diagnóstico automático da página. Pedido uma única vez, no primeiro Screenshot, e vale para todos os sites que você testar.</p>
+          </div>
+          <span class="access-status" data-status="checking">Verificando…</span>
+        </div>
+        <div class="access-body">
+          <div class="access-steps">
+            <ol>
+              <li>Clique em <strong>Liberar acesso às páginas</strong>.</li>
+              <li>No aviso do Chrome, clique em <strong>Permitir</strong>.</li>
+            </ol>
+            <p class="access-note">A extensão só lê a página quando você usa um recurso do painel. O Chrome exige este acesso para capturar a tela a partir do painel lateral.</p>
+            <div class="access-actions">
+              <button class="button button-primary button-small" type="button" data-action="grant-pages">Liberar acesso às páginas</button>
+            </div>
+          </div>
+          <figure class="prompt-mock" aria-hidden="true">
+            <div class="prompt-window">
+              <strong>“WiControl QA” quer permissão para:</strong>
+              <span>Ler e alterar todos os seus dados em todos os sites</span>
+              <div class="prompt-buttons"><span>Negar</span><span class="is-target">Permitir</span></div>
+            </div>
+            <figcaption>Aviso que o Chrome mostra</figcaption>
+          </figure>
+        </div>
+        <!-- Oculto enquanto "Gravar tela" estiver desativado no painel. -->
+        <div class="access-extra hidden">
+          <h3>Gravar tela</h3>
+          <p>O Chrome só libera a gravação depois que a extensão é acionada na própria aba — não existe permissão que dispense isso. Antes de gravar:</p>
+          <ol>
+            <li>Deixe aberta a aba que você quer gravar.</li>
+            <li>Clique no ícone do <strong>WiControl QA</strong> <span class="kbd">🧩</span> na barra do Chrome.</li>
+            <li>No painel, clique em <strong>Gravar tela</strong>.</li>
+          </ol>
+          <p class="access-note">Se você trocar de aba ou recarregar a página, repita o passo 2. Dica: fixe o ícone clicando no quebra-cabeça 🧩 e no alfinete ao lado de WiControl QA.</p>
+        </div>
+      </section>
+
+      <p class="access-footer">Tudo liberado? Pode fechar esta aba e voltar ao painel.</p>
+    </main>
+
+    <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+    <script src="permissions.js"></script>
+  </body>
+</html>

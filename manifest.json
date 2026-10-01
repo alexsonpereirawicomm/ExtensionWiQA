@@ -1,0 +1,37 @@
+{
+  "manifest_version": 3,
+  "name": "WiControl QA",
+  "version": "1.1.0",
+  "description": "Ferramenta de captura de tela e gravação para QA - Wicomm",
+  "minimum_chrome_version": "116",
+  "icons": {
+    "16": "assets/logo-mark.svg",
+    "32": "assets/logo-mark.svg",
+    "48": "assets/logo-mark.svg",
+    "128": "assets/logo-mark.svg"
+  },
+  "action": {
+    "default_popup": "popup/popup.html"
+  },
+  "side_panel": {
+    "default_path": "sidepanel/sidepanel.html"
+  },
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "offscreen",
+    "tabCapture",
+    "sidePanel",
+    "webRequest"
+  ],
+  "optional_host_permissions": [
+    "<all_urls>",
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  }
+}
