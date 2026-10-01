@@ -19,6 +19,7 @@ import {
   getRecording,
   pruneExpiredRecordings,
 } from '../shared/media-store.js';
+import { SUPABASE_ANON_KEY, SUPABASE_URL } from '../shared/config.js';
 
 const OFFSCREEN_PATH = 'offscreen/offscreen.html';
 const BACKGROUND_PROTOCOL_VERSION = 7;
@@ -227,6 +228,13 @@ async function getContext() {
     STORAGE_KEYS.LAST_ITEM,
     STORAGE_KEYS.CAPTURED_MEDIA_LEGACY,
   ]);
+  // Configurações salvas antes da conexão fixa (ex.: Supabase local) apontam
+  // para outro projeto; o usuário precisa conectar de novo.
+  if (stored[STORAGE_KEYS.CONFIG] && stored[STORAGE_KEYS.CONFIG].supabaseUrl !== SUPABASE_URL) {
+    await chrome.storage.local.remove([STORAGE_KEYS.CONFIG, STORAGE_KEYS.PROJECT]);
+    delete stored[STORAGE_KEYS.CONFIG];
+    delete stored[STORAGE_KEYS.PROJECT];
+  }
   const tab = await getActiveTab().catch(() => null);
   if (tab?.id && /^https?:\/\//i.test(tab.url || '')) {
     await ensureContentScript(tab.id).catch(() => undefined);
@@ -259,8 +267,13 @@ async function getContext() {
   };
 }
 
+// URL e chave pública vêm de shared/config.js; o painel só informa token e senha.
+function withFixedConnection(rawConfig) {
+  return { ...rawConfig, supabaseUrl: SUPABASE_URL, supabaseKey: SUPABASE_ANON_KEY };
+}
+
 async function validateAndSaveConfig(rawConfig) {
-  const config = sanitizeConfig(rawConfig);
+  const config = sanitizeConfig(withFixedConnection(rawConfig));
   
   if (config.authMode === 'client' && rawConfig.clientPassword) {
     // Tenta gerar o token de sessão do convidado
@@ -896,7 +909,7 @@ async function requireConfig() {
     });
   }
   if (isClientSessionExpired(config)) throw sessionExpiredError();
-  return sanitizeConfig(config);
+  return sanitizeConfig(withFixedConnection(config));
 }
 
 function normalizeDraft(raw = {}) {

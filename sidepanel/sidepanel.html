@@ -106,31 +106,13 @@
 										<div class="setup-intro">
 												<span class="eyebrow">Configuração segura</span>
 												<h1 id="setupTitle">Conecte seu projeto</h1>
-												<p>Informe o projeto do Supabase e escolha como você acessa o WiFlow.</p>
+												<p>Informe o token do projeto e a senha de acesso.</p>
 										</div>
 
 										<form id="setupForm" class="setup-form" novalidate>
 												<div class="field">
-														<label for="supabaseUrl">URL do Supabase (Mock Local)</label>
-														<input id="supabaseUrl" name="supabaseUrl" type="url" inputmode="url" placeholder="http://127.0.0.1:54421" value="http://127.0.0.1:54421" autocomplete="off" spellcheck="false" required>
-												</div>
-
-												<div class="field">
-														<label for="anonKey">Chave publishable ou anon</label>
-														<div class="password-field">
-																<input id="anonKey" name="anonKey" type="password" placeholder="sb_publishable_…" value="sb_publishable_ACJWlzQHlZjBrEguHvfOxg_3BJgxAaH" autocomplete="off" spellcheck="false">
-																<button class="password-toggle" type="button" data-toggle-password="anonKey" aria-label="Mostrar chave">
-																		<svg aria-hidden="true">
-																				<use href="#icon-eye"></use>
-																		</svg>
-																</button>
-														</div>
-														<small id="anonKeyHint" class="field-hint">Acesso mockado para o ambiente local.</small>
-												</div>
-
-												<div class="field">
 														<label for="projectToken">Token de compartilhamento do projeto</label>
-														<input id="projectToken" name="projectToken" type="text" placeholder="local-…" value="ca3c4787-4be4-4d18-a4fb-8482ca212a67" autocomplete="off" spellcheck="false">
+														<input id="projectToken" name="projectToken" type="text" placeholder="Cole o token do projeto" autocomplete="off" spellcheck="false" required>
 												</div>
 
 												<fieldset class="auth-fieldset hidden">
@@ -147,7 +129,7 @@
 														<div class="field">
 																<label for="clientPassword">Senha de Acesso (Convidado)</label>
 																<div class="password-field">
-																		<input id="clientPassword" name="clientPassword" type="password" value="Wicomm#2026" autocomplete="off" spellcheck="false" placeholder="Senha do projeto">
+																		<input id="clientPassword" name="clientPassword" type="password" autocomplete="off" spellcheck="false" placeholder="Senha do projeto">
 																		<button class="password-toggle" type="button" data-toggle-password="clientPassword" aria-label="Mostrar senha">
 																				<svg aria-hidden="true">
 																						<use href="#icon-eye"></use>

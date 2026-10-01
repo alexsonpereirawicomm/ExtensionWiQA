@@ -182,14 +182,13 @@
       scheduleSessionExpiry();
     } else {
       showSetup(false);
-      dom.setupForm.requestSubmit();
     }
   }
 
   function cacheDom() {
     const ids = [
       'connectionBadge', 'connectionLabel', 'btnSettings', 'setupView', 'setupForm',
-      'setupTitle', 'supabaseUrl', 'anonKey', 'anonKeyHint', 'projectToken',
+      'setupTitle', 'projectToken',
       'clientAuthFields', 'wiflowAuthFields', 'clientPassword', 'wiflowSessionToken',
       'wiflowUserId', 'setupError', 'btnCancelSetup', 'btnConnect', 'connectButtonLabel',
       'connectSpinner', 'workspaceView', 'projectName', 'btnRefreshContext', 'pageDomain',
@@ -314,7 +313,6 @@
     setConnectionState('busy', 'Validando');
 
     try {
-      await requestOriginPermission(config.supabaseUrl);
       const response = await sendCommand(MESSAGE.VALIDATE_CONFIG, { config }, { timeoutMs: 25000 });
       if (!isSuccess(response)) throw responseError(response, 'Não foi possível validar a conexão.');
 
@@ -350,16 +348,15 @@
     }
   }
 
+  // URL e chave do Supabase são fixas (shared/config.js) e aplicadas pelo
+  // background; o painel só coleta token do projeto e credenciais de acesso.
   function readSetupConfig() {
     const mode = selectedAuthMode();
     const previous = state.config || {};
-    const anonInput = dom.anonKey.value.trim();
     const clientInput = dom.clientPassword ? dom.clientPassword.value.trim() : '';
     const sessionInput = dom.wiflowSessionToken.value.trim();
 
     const config = {
-      supabaseUrl: trimTrailingSlash(dom.supabaseUrl.value.trim()),
-      anonKey: anonInput || unmaskedValue(previous.anonKey || previous.publishableKey),
       projectToken: dom.projectToken.value.trim() || unmaskedValue(previous.projectToken || previous.token),
       authMode: mode,
       clientPassword: mode === 'client' ? clientInput : '',
@@ -374,7 +371,6 @@
     };
 
     // Aliases explícitos ajudam a migração do cliente sem alterar o contrato HTTP.
-    config.publishableKey = config.anonKey;
     config.token = config.projectToken;
     config.sessionToken = config.wiflowSessionToken;
     config.userId = config.wiflowUserId;
@@ -382,19 +378,6 @@
   }
 
   function validateSetupConfig(config) {
-    if (!config.supabaseUrl) return 'Informe a URL do Supabase.';
-
-    try {
-      const url = new URL(config.supabaseUrl);
-      const localHost = ['localhost', '127.0.0.1'].includes(url.hostname);
-      if (url.protocol !== 'https:' && !(localHost && url.protocol === 'http:')) {
-        return 'Use uma URL HTTPS do Supabase (HTTP é aceito apenas localmente).';
-      }
-    } catch (error) {
-      return 'A URL do Supabase não é válida.';
-    }
-
-    if (!config.anonKey) return 'Informe a chave publishable ou anon.';
     if (!config.projectToken) return 'Informe o token do projeto.';
 
     if (config.authMode === 'client' && !config.clientPassword && !config.clientAccessToken) {
@@ -414,7 +397,6 @@
       return;
     }
 
-    dom.supabaseUrl.value = config.supabaseUrl || config.url || '';
     dom.projectToken.value = displayableValue(config.projectToken || config.token);
 
     const authMode = config.authMode === 'wiflow' ? 'wiflow' : 'client';
@@ -422,7 +404,6 @@
     if (authRadio) authRadio.checked = true;
 
     dom.wiflowUserId.value = displayableValue(config.wiflowUserId || config.userId);
-    setSecretPlaceholder(dom.anonKey, config.anonKey || config.publishableKey, config.hasAnonKey || config.hasPublishableKey);
     if (dom.clientPassword) {
       setSecretPlaceholder(dom.clientPassword, '', config.hasClientAccessToken);
     }
@@ -1628,7 +1609,7 @@
     dom.btnCancelSetup.classList.toggle('hidden', !allowCancel || !state.connected);
     dom.setupTitle.textContent = state.connected ? 'Configurações da conexão' : 'Conecte seu projeto';
     clearSetupError();
-    requestAnimationFrame(() => dom.supabaseUrl.focus());
+    requestAnimationFrame(() => dom.projectToken.focus());
   }
 
   function showWorkspace() {
@@ -1669,7 +1650,7 @@
     showSetup(false);
     showSetupError(message || 'Sua sessão expirou. Informe a senha novamente para continuar.');
     setConnectionState('offline', 'Sessão expirada');
-    requestAnimationFrame(() => (dom.clientPassword || dom.supabaseUrl).focus());
+    requestAnimationFrame(() => (dom.clientPassword || dom.projectToken).focus());
   }
 
   function sessionExpiresAt() {
@@ -1986,19 +1967,6 @@
   function hasReportEvidence() {
     const diagnostics = state.diagnostics || {};
     return Boolean(diagnostics.element);
-  }
-
-  async function requestOriginPermission(value) {
-    if (!chrome.permissions?.request) return;
-    const origin = new URL(value).origin;
-    const pattern = `${origin}/*`;
-    const hasPermission = await chrome.permissions.contains({ origins: [pattern] });
-    if (hasPermission) return;
-    const granted = await chrome.permissions.request({ origins: [pattern] });
-    if (!granted) {
-      openPermissionsPage('site', { origin });
-      throw new Error('Autorize o acesso ao domínio do Supabase para conectar o projeto. O passo a passo abriu numa nova aba.');
-    }
   }
 
   function showSetupError(message) {
@@ -2324,10 +2292,6 @@
       ? crypto.randomUUID()
       : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
     return `${prefix}-${value}`;
-  }
-
-  function trimTrailingSlash(value) {
-    return value.replace(/\/+$/, '');
   }
 
   function isMasked(value) {

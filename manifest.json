@@ -25,6 +25,9 @@
     "sidePanel",
     "webRequest"
   ],
+  "host_permissions": [
+    "https://gfzsahqvxloggzlvrpxr.supabase.co/*"
+  ],
   "optional_host_permissions": [
     "<all_urls>",
     "http://*/*",
