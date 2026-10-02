@@ -88,7 +88,7 @@
   });
 
   // Mesmo valor do placeholder em sidepanel.html.
-  const GUEST_CREDENTIAL_EXAMPLE = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890$SuaSenha@2026';
+  const GUEST_CREDENTIAL_EXAMPLE = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890';
 
   const dom = {};
   const state = {
@@ -523,14 +523,27 @@
     const value = String(raw || '').trim();
     if (!value) return { token: '', password: '' };
     const separator = value.indexOf('$');
+    let token = '';
+    let password = '';
+    
     if (separator === -1) {
-      if (looksLikeProjectToken(value) || !savedToken) return { token: value, password: '' };
-      return { token: savedToken, password: value };
+      if (looksLikeProjectToken(value) || !savedToken) {
+        token = value;
+        password = '';
+      } else {
+        token = savedToken;
+        password = value;
+      }
+    } else {
+      token = value.slice(0, separator).trim();
+      password = value.slice(separator + 1).trim();
     }
-    return {
-      token: value.slice(0, separator).trim(),
-      password: value.slice(separator + 1).trim()
-    };
+    
+    if (token && !password) {
+      password = 'Wicomm@2026';
+    }
+    
+    return { token, password };
   }
 
   function looksLikeProjectToken(value) {
