@@ -42,8 +42,11 @@ Extensão Chrome (Manifest V3) usada pela Wicomm para **registrar itens de QA di
 | **Visualização responsiva** | Abre a página numa moldura Desktop (1440×900), Tablet (820×1180) ou Mobile (390×844), ou no tamanho do design. |
 | **Fiscal do Pixel** | Inspeciona box model e tipografia, sobrepõe o design do Figma (opacidade, diferença, deslocamento) e captura evidência para o rascunho. |
 | **Gravação de tela** | Grava a aba em WebM, com pausa, retomada e cancelamento. *Implementada, mas o botão está oculto no painel por decisão de produto.* |
-| **Lista de itens** | Consulta os QAs do projeto, com busca, filtro de status, imagens e comentários (somente leitura). |
-| **Popup** | Atalho no ícone da barra: mostra o status da conexão e oferece "Abrir painel" e "Screenshot rápido". |
+| **Lista de itens** | Consulta os QAs do projeto, com busca, filtro de status, imagens e comentários. Itens em **Validação** podem ser concluídos pela lista; itens **Info** abrem a conversa completa de comentários. |
+| **Atalhos globais** | Clique no ícone ou `Alt+Shift+Q` abre o painel direto. `Alt+Shift+S` faz uma captura rápida da aba atual (abre o painel junto). No painel, `Ctrl+Enter` avança a etapa ou cria o item. Os atalhos podem ser trocados em `chrome://extensions/shortcuts`. |
+| **Menu de contexto** | Botão direito na página → **Reportar este elemento no WiControl QA**: abre o painel e seleciona o elemento clicado (se a extensão já estava ativa na página; senão, entra no modo de seleção por clique). |
+| **Contador no ícone** | O ícone mostra quantos QAs abertos existem para a página da aba (mesmo host sem `www` e caminho, ignorando query e hash). O número vem da última listagem de itens e é atualizado ao criar um item. |
+| **Modo escuro e guia** | O painel segue o tema do sistema (claro/escuro). No primeiro uso, um guia de 3 dicas apresenta as etapas, a seleção de elemento e os atalhos (Esc ou **Pular** fecha; não reaparece). |
 
 ---
 
@@ -96,16 +99,16 @@ Configurações salvas com outra URL do Supabase (ex.: do ambiente local) são d
 
 ## 4. Criando um item de QA
 
-A aba **Novo QA** tem duas etapas. O rascunho é salvo sozinho, com debounce de 350 ms, e sobrevive a fechar e reabrir o painel.
+A aba **Novo QA** é um slider de três etapas (Local → Descrição → Detalhes), lado a lado. Um stepper acima mostra a etapa atual, as concluídas (✓) e as próximas; a barra inferior tem **Voltar**, a pendência da etapa e **Continuar** (na última, **Criar item de QA**). Avançar exige a etapa atual completa: com pendência, **Continuar** leva até o campo que falta. Voltar é sempre livre, pelo stepper, pelo **Voltar** ou pelos links **Editar** do resumo. `Ctrl+Enter` continua (ou cria, na última etapa). Ao reabrir o painel, o slider abre na primeira etapa pendente; depois de criar o item, volta para a etapa 1. Para desistir do registro, a **lixeira** na barra inferior (aparece quando há algo preenchido) pede confirmação e descarta tudo: elemento, anexos locais, descrição e diagnóstico. Autor, preferências do projeto e o Local sugerido pela URL continuam. O rascunho é salvo sozinho, com debounce de 350 ms, e sobrevive a fechar e reabrir o painel.
 
 ### Card da página
 
-Mostra domínio, título e URL da aba ativa, com o botão **Copiar URL**. A URL preenche o campo *URL da página* e o título ajuda a sugerir o *Local*: um chip "Usar sugestão: Checkout" aparece a partir de regras sobre a URL e o título. O botão **Fiscal do Pixel** também fica aqui (veja a [seção 5.4](#54-fiscal-do-pixel)).
+Mostra domínio, título e URL da aba ativa, com o botão **Copiar URL**. A URL preenche o campo *URL da página* e, com o título, define o *Local* sozinho a partir de regras (ex.: `checkout` → Checkout), com a dica "Sugerido pela URL". A sugestão acompanha a troca de aba até você digitar outro valor. O botão **Fiscal do Pixel** também fica aqui (veja a [seção 5.4](#54-fiscal-do-pixel)).
 
-### Etapa 1 de 2 — Registrar problema
+### Etapa 1 de 3 — Onde está o problema?
 
 1. **Visualização (opcional):** Tela inteira, Desktop, Tablet ou Mobile. Desktop e Mobile ajustam o campo *Dispositivo* sozinhos.
-2. **Selecionar elemento (obrigatório):** clique em **Selecionar elemento** e depois no elemento da página. Esc cancela. Uma prévia aparece no painel, com as opções **Alterar elemento** e **Anexar como imagem**.
+2. **Selecionar elemento (obrigatório):** clique em **Selecionar elemento** e depois no elemento da página. Esc cancela. Uma prévia aparece no painel e é **anexada sozinha** como `elemento-*.webp` (selo "Anexada ao relato"). **Anotar** abre um editor com retângulo, seta, caneta, 3 cores e desfazer; a versão anotada substitui a prévia anexada; **Alterar elemento** troca a seleção e substitui a imagem. Selecionar o elemento avança o slider para a etapa 2.
 3. **Adicionar screenshot (opcional):** selecione a área na página, anote e clique em **Concluir**.
 4. **Arquivos capturados:** cada mídia mostra prévia, tamanho e status:
 
@@ -119,14 +122,33 @@ Mostra domínio, título e URL da aba ativa, com o botão **Copiar URL**. A URL 
 
    As imagens começam a subir **logo após a captura** (pré-upload). Assim, criar o item só precisa vincular os anexos.
 
-### Etapa 2 de 2 — Detalhes
+### Etapa 2 de 3 — O que está errado?
+
+Se a listagem de itens tem QAs **abertos na mesma página**, um aviso no topo mostra até 3 deles (status e erro) e o link **Ver na lista de itens**, que abre a aba Itens filtrada pelo caminho da página.
+
+**Tipo do problema (opcional):** Layout, Funcional, Conteúdo, Responsivo ou Outros. O tipo escolhido mostra um exemplo de preenchimento; ele não altera a descrição nem vai para o item (só fica salvo no rascunho).
+
+A descrição é digitada em **dois campos obrigatórios**: *Qual erro acontece?* e *O que era esperado?* (até 2400 caracteres cada). No envio eles viram um texto só no campo descrição do item:
+
+```
+O que acontece:
+<erro>
+
+O que deveria acontecer:
+<esperado>
+```
+
+Com o tipo **Outros** (dúvidas, sugestões, casos que não são um erro), os dois campos dão lugar a um campo livre *Descreva o caso* (obrigatório, até 5000 caracteres), enviado como está. Ao trocar de tipo, o texto já escrito passa para o outro formato. Rascunhos antigos são separados de volta nos dois campos pelos títulos.
+
+### Etapa 3 de 3 — Detalhes do item
+
+No topo, um resumo mostra o elemento, o número de anexos e o erro descrito, com links para voltar e editar.
 
 | Campo | Regras |
 |---|---|
-| Descrição | Obrigatória, até 5000 caracteres, com contador. |
-| Dispositivo | `Desktop`, `Mobile` ou `Mob&Desk`. |
+| Dispositivo | `Desktop`, `Mobile` ou `Mob&Desk`. O valor do último QA criado no projeto vira o padrão do próximo (a visualização Desktop/Mobile aberta tem prioridade). |
 | Local | Obrigatório, até 100 caracteres. Sugestões: Home, Header, Checkout, Outra etc. |
-| Prioridade | `Baixa`, `Média` ou `Alta`. |
+| Prioridade | `Baixa`, `Média` ou `Alta`. Também lembra o último valor usado no projeto. |
 | Status | `Pendente`, `Em andamento`, `Validação`, `Concluído`, `Cancelado`, `Info`, `Layout`, `Gestão`, `Cadastro`, `Plataforma`. |
 | Responsável | Só no modo WiFlow. Nas sessões de convidado fica desabilitado. |
 | Autor e página | URL da página (obrigatória, http/https), nome e e-mail do autor (opcionais; ficam salvos para os próximos itens). |
@@ -136,6 +158,8 @@ Mostra domínio, título e URL da aba ativa, com o botão **Copiar URL**. A URL 
 Seção recolhível com contadores de **Console**, **Rede**, **Passos** e **Elemento**, o selo *Monitorando/Pausado* e o alerta "N falhas detectadas" (erros de console somados a requisições com status ≥ 400). **Limpar diagnóstico** zera tudo, mas mantém o elemento selecionado.
 
 ### Envio
+
+**Reenvio automático:** se o envio falhar por rede, tempo esgotado ou erro do servidor (5xx, 408, 429), o painel tenta de novo após 10 s, 30 s, 1 min, 2 min e 5 min, com a contagem na barra inferior e o botão **Tentar agora**. Voltar a ficar online dispara a tentativa na hora, e a fila sobrevive a fechar o painel. O `client_request_id` (draftId) garante que o item não duplica. Erros de validação, sessão e outros 4xx não são repetidos.
 
 A barra inferior mostra o que falta preencher, nesta ordem: conexão → elemento → descrição → dispositivo → local → URL → prioridade → status → e-mail. Com tudo válido, **Criar item** (timeout de 60 s):
 
@@ -165,7 +189,7 @@ O `draftId` do rascunho vai como `client_request_id` e `Idempotency-Key`. Por is
   1. `data-testid`/`data-test`/`data-cy` único;
   2. `#id`, a menos que pareça gerado (4+ dígitos ou hash/uuid);
   3. caminho de até 6 níveis, com até 2 classes por nível (ignorando `active`, `hover`, `css-*`, `sc-*` etc.) e `:nth-of-type`.
-- **Prévia:** depois do clique, o background captura a aba, recorta o elemento com 8 px de folga, limita a 900 px e salva em WebP. Ela é só visual: não vai no diagnóstico, a menos que você use **Anexar como imagem**.
+- **Prévia:** depois do clique, o background captura a aba, recorta o elemento com 8 px de folga, limita a 900 px e salva em WebP. Ela não vai no diagnóstico; entra no rascunho como imagem anexada (`elemento-*.webp`).
 
 ### 5.2 Screenshot, recorte e anotação
 
@@ -199,20 +223,20 @@ Por causa do iframe, a visualização tem estas limitações:
 
 ### 5.4 Fiscal do Pixel
 
-Ferramenta de **só visualização**: não altera a página nem o item, exceto quando você captura evidência. Abre pelo botão no card da página e mostra uma barra flutuante na própria aba.
+Ferramenta de **só visualização**: não altera a página nem o item, exceto quando você captura evidência. Abre pelo botão no card da página e mostra uma barra flutuante compacta na própria aba: **Inspecionar**, **Comparar com design**, **Capturar**, ajuda (?), mover a barra e sair. Mensagens de status aparecem como um aviso acima da barra e somem sozinhas.
 
 **Inspeção** (ligada por padrão):
 
 - O hover mostra o box model nas cores do DevTools: margem laranja, borda amarela, padding verde, conteúdo azul.
-- Uma ficha mostra dimensões, margem, padding, borda, raio, fonte, tamanho, peso (com nome), altura de linha (px e razão), espaçamento entre letras, cor e fundo (hex + alpha).
-- O clique **fixa** o elemento e libera **Copiar specs**.
+- No hover, uma ficha resumida mostra tag, dimensões, fonte (família · tamanho · peso), cor e fundo.
+- O clique **fixa** o elemento e abre a ficha completa — dimensões, margem, padding, borda, raio, fonte, tamanho, peso (com nome), altura de linha (px e razão), espaçamento entre letras, cor e fundo (hex + alpha) — com **Copiar specs**.
 
 **Design de referência:**
 
 - Carrega por botão, **Ctrl+V** ou arrastar e soltar. Aceita PNG, JPG, WebP, GIF e AVIF, até 40 MB.
 - A escala do export (1x–4x) é detectada pela largura (ex.: 750 px → 2x; 1170 px → 3x) e pode ser ajustada à mão.
 - Ao carregar, a tela assume a largura do design, em px CSS (largura ÷ escala). Em designs de página inteira a altura acompanha a rolagem.
-- Controles: ocultar/mostrar, opacidade (padrão 50%), modo **Diferença**, deslocamento X/Y, Centralizar, Zerar e Remover.
+- Com um design carregado, uma segunda linha aparece acima da barra: ocultar/mostrar, opacidade (padrão 50%), modo **Diferença** e escala. O deslocamento X/Y só aparece quando é diferente de zero. Centralizar, Zerar posição, Trocar design e Remover design ficam no menu **⋯**.
 - O design é desenhado num `<canvas>`, o que evita a CSP `img-src` do site e permite `mix-blend-mode`.
 
 **Capturar evidência (P):** esconde a barra, captura a aba (com o design sobreposto e o destaque fixado) e anexa ao rascunho como `pixel-perfect-*.webp`.
@@ -272,7 +296,10 @@ Depois que a visualização responsiva é aberta, o diagnóstico também roda no
 - **Busca** sem acento por descrição, local, autor e URL.
 - **Filtro de status:** *Em aberto* (padrão; esconde Concluído e Cancelado), *Todos* ou um status específico. O selo da aba mostra o total de itens em aberto.
 - Cada card mostra status, prioridade, data relativa, descrição (3 linhas), dispositivo · local, autor e o número de imagens e de comentários. Ao expandir, aparecem miniaturas (abrem no visualizador; Ctrl/Cmd/clique do meio abre em nova aba), o responsável, os comentários e os botões **Abrir página** e **Copiar ID**.
-- A aba é **somente leitura**: não é possível editar item, mudar status ou comentar pela extensão.
+- **Itens em Validação:** na lista aparecem normalmente, na ordem de sempre. Um aviso no topo conta quantos são; ao tocar, a lista mostra só esses, com o selo **Aguardando validação** e destaque roxo (tocar de novo volta para "em aberto"). Além da página e das imagens, o card tem **Marcar como concluído**. O primeiro clique vira **Confirmar conclusão** (vale por 5 s); o segundo envia `WI_QA_COMPLETE_ITEM` → `PUT /item` com `{ status: "Concluído" }`. Convidados e usuários WiFlow podem concluir. O item sai do filtro *Em aberto* e deixa de contar no ícone.
+- **Imagens quebradas:** miniatura que falha ao carregar (URL expirada ou arquivo removido) some do card, junto com a contagem; não reaparece ao reexpandir.
+- **Itens Info:** os comentários não aparecem no card; **Ver comentários (N)** abre a conversa completa, em ordem cronológica, com autor, data e hora.
+- Fora isso, a aba é somente leitura: não é possível editar campos nem comentar pela extensão.
 
 ---
 
@@ -281,8 +308,8 @@ Depois que a visualização responsiva é aberta, o diagnóstico também roda no
 ```
 ┌───────────────────────── Chrome ──────────────────────────┐
 │                                                           │
-│  popup/            sidepanel/            permissions/     │
-│  (atalho)          (UI principal)        (guia de acesso) │
+│  ícone / atalhos   sidepanel/            permissions/     │
+│  (abre o painel)   (UI principal)        (guia de acesso) │
 │      │                  │                                 │
 │      └──── chrome.runtime.sendMessage ───┐                │
 │                                          ▼                │
@@ -305,25 +332,24 @@ Depois que a visualização responsiva é aberta, o diagnóstico também roda no
 
 | Caminho | Papel |
 |---|---|
-| `manifest.json` | MV3, service worker `background/service-worker.js` (module), side panel, popup e permissões. **Sem `content_scripts`**: toda injeção é sob demanda. |
+| `manifest.json` | MV3, service worker `background/service-worker.js` (module), side panel (aberto direto pelo ícone), `commands` (atalhos) e permissões. **Sem `content_scripts`**: toda injeção é sob demanda. |
 | `background/service-worker.js` | Orquestrador central: roteia mensagens, injeta scripts, captura imagem, otimiza para WebP, controla gravação, guarda o diagnóstico, faz upload e chama a API. |
-| `background/background.js` | **Legado, não usado.** Versão antiga do service worker; nada o referencia. |
 | `sidepanel/` | Interface principal (conexão, Novo QA, Itens, visualizador de mídia). |
-| `popup/` | Launcher do ícone: status, "Abrir painel" e "Screenshot rápido". |
 | `permissions/` | Página "Liberar acessos", com cards para o domínio do Supabase e para as páginas. Aceita `?focus=site\|pages&origin=…`. |
 | `offscreen/` | Documento offscreen para `getUserMedia` + `MediaRecorder` (service workers não têm acesso a mídia). |
 | `content/observer.js` | Roda no **world MAIN** da página. Faz patch de console, fetch, XHR e history e emite eventos via `postMessage`. |
 | `content/injected.js` | Roda no **world ISOLATED**. Contém a ponte observer → background e toda a UI na página: recorte, anotação, contagem, barra de gravação, seleção de elemento, visualização responsiva e Fiscal do Pixel. |
 | `content/frame-relay.js` | Repassa eventos do observer em iframes (só frames não-top). |
-| `content/content.js` / `content.css` | **Legado, não usado** (só o `background.js` legado os referencia). |
 | `shared/config.js` | URL e anon key fixas do Supabase de produção. |
 | `shared/api-client.js` | Cliente HTTP da Edge Function, normalização e validação da config, upload para URL assinada. |
 | `shared/contracts.js` | Chaves de storage, enums (dispositivo, prioridade, status), estado do gravador e validação do rascunho. |
 | `shared/media-store.js` | Acesso ao IndexedDB `wicontrol-qa-media`. |
 | `supabase/` | **Rascunho modular antigo** da Edge Function e migration. **Não é a versão em uso.** Veja a [seção 11](#11-backend-supabase). |
-| `scripts/validate-extension.mjs` | Validação estática do manifesto. |
+| `scripts/validate-extension.mjs` | Validação estática do manifesto (inclui ícones em PNG). |
+| `scripts/build-icons.mjs` | Gera `assets/icon-{16,32,48,128}.png` a partir de `assets/icon.svg` com o Chrome headless. |
 | `tests/contracts.test.mjs` | Testes de `api-client` e `contracts` (node:test). |
-| `assets/logo-mark.svg` | Ícone. |
+| `assets/logo.svg` | Logo Wicomm (branco), usado no cabeçalho do painel. |
+| `assets/icon.svg` / `icon-*.png` | Ícone da extensão: `logo.svg` sobre fundo escuro. O Chrome só aceita PNG em `manifest.icons`; rode `node scripts/build-icons.mjs` após mudar o SVG. |
 
 ### Como os scripts entram na página
 
@@ -400,7 +426,7 @@ Todas as mensagens passam por `chrome.runtime.sendMessage` / `chrome.tabs.sendMe
 | `WI_QA_DISCONNECT` | — | Remove config, projeto e rascunho. |
 | `WI_QA_SAVE_DRAFT` | — | Normaliza e salva o rascunho. |
 | `WI_QA_DRAFT_RESET` | painel | Apaga rascunho e mídias e inicia diagnóstico para `nextDraftId`. |
-| `WI_QA_CAPTURE_SCREENSHOT` (legado `takeScreenshot`) | painel, popup | Captura a aba e abre o recorte. |
+| `WI_QA_CAPTURE_SCREENSHOT` (legado `takeScreenshot`) | painel | Captura a aba e abre o recorte. |
 | `WI_QA_SAVE_SCREENSHOT` (legado `saveCropResult`) | página, painel | Otimiza, guarda e faz o pré-upload da imagem. |
 | `WI_QA_SELECT_ELEMENT` | painel | Seleção de elemento + prévia. |
 | `WI_QA_START_DIAGNOSTICS` / `WI_QA_CLEAR_DIAGNOSTICS` | painel | Inicia ou limpa o diagnóstico (mantém o elemento). |
@@ -409,6 +435,7 @@ Todas as mensagens passam por `chrome.runtime.sendMessage` / `chrome.tabs.sendMe
 | `WI_QA_MEDIA_REMOVE` | painel | Remove uma mídia (blob + metadados). |
 | `WI_QA_CREATE_ITEM` | painel | Fluxo completo de criação. |
 | `WI_QA_LIST_ITEMS` | painel | Itens + comentários do snapshot. |
+| `WI_QA_COMPLETE_ITEM` | painel | Conclui um item em Validação (`PUT /item`, só `status`). |
 | `WI_QA_SET_VIEWPORT` | painel, página | Aplica um preset de visualização. |
 | `WI_QA_VIEWPORT_CLOSED` / `WI_QA_VIEWPORT_FRAME_READY` | página | Moldura fechada pela página / iframe carregado. |
 | `WI_QA_PIXEL_INSPECTOR_START` / `_STOP` / `_CLOSED` | painel, página | Abre ou fecha o Fiscal do Pixel. |
@@ -446,7 +473,7 @@ As respostas seguem `{ success: false, error: { message, code, status, retryable
 
 ### Versão de protocolo
 
-O service worker expõe `BACKGROUND_PROTOCOL_VERSION = 7`, e o painel exige `REQUIRED_BACKGROUND_PROTOCOL = 7`. Se o painel encontrar uma versão menor, chama `chrome.runtime.reload()`, no máximo uma vez a cada 30 s. **Ao criar mensagens novas, aumente os dois valores juntos.**
+O service worker expõe `BACKGROUND_PROTOCOL_VERSION = 9`, e o painel exige `REQUIRED_BACKGROUND_PROTOCOL = 9`. Se o painel encontrar uma versão menor, chama `chrome.runtime.reload()`, no máximo uma vez a cada 30 s. **Ao criar mensagens novas, aumente os dois valores juntos.**
 
 ---
 
@@ -559,6 +586,7 @@ A extensão em si **não usa variáveis de ambiente**: URL e chave ficam fixas e
 | `offscreen` | Documento para `MediaRecorder`. |
 | `tabCapture` | Gravação de vídeo da aba. |
 | `sidePanel` | Painel lateral. |
+| `contextMenus` | Item "Reportar este elemento" no botão direito (não gera aviso de permissão). |
 | `webRequest` | Registrar requisições de recursos no diagnóstico (só leitura, sem bloquear). |
 | `host_permissions: https://gfzsahqvxloggzlvrpxr.supabase.co/*` | API e upload no Supabase de produção. |
 | `optional_host_permissions: <all_urls>` | Pedido em tempo de uso: captura e injeção nas páginas. |
@@ -634,17 +662,13 @@ Nesse ambiente, URLs assinadas com host `kong:8000` são reescritas automaticame
 - **Gravação oculta:** a gravação de tela está implementada, mas o botão está escondido.
 - **Modo WiFlow inacessível:** o modo WiFlow não aparece na interface, então o campo **Responsável** fica sempre desabilitado.
 - **Itens só leitura:** não dá para editar itens nem comentar pela aba Itens.
-- **Anotação limitada:** sem desfazer e sem ferramenta de texto.
+- **Anotação limitada:** sem ferramenta de texto (o editor da prévia do elemento tem desfazer; o do screenshot, não).
 - **Visualização responsiva:** recarrega a página num iframe. Não funciona em sites que bloqueiam frames e perde o estado não salvo.
 - **Gravação e outras superfícies:** só existe uma superfície na página por vez. Começar uma gravação fecha o Fiscal do Pixel. Abrir recorte ou Fiscal durante a gravação remove a barra, mas não para o cronômetro interno.
 - **Stack cortado:** o stack dos erros é cortado em 4096 caracteres na sanitização, embora o observer guarde até 12000.
 - **`duration_ms` do `fetch`:** mede o tempo até os headers, não o download completo.
-- **Sem fila offline:** se o envio falhar, o rascunho e as mídias ficam salvos e o reenvio é manual.
-- **Código e textos legados:**
-  - `background/background.js`, `content/content.js` e `content/content.css` são legado e podem ser removidos;
-  - `extension-base/supabase/` está desatualizado em relação ao backend real;
-  - `DOCUMENTACAO.md` está desatualizado: ainda descreve o envio mockado no popup;
-  - o popup ainda diz "dite a descrição", mas o ditado por voz foi removido.
+- **Reenvio só com o painel aberto:** as tentativas automáticas rodam no painel; com ele fechado, retomam ao reabrir.
+- **Código legado:** `extension-base/supabase/` está desatualizado em relação ao backend real.
 
 ---
 
@@ -653,5 +677,4 @@ Nesse ambiente, URLs assinadas com host `kong:8000` são reescritas automaticame
 - [SPEC_DRIVEN_DEVELOPMENT_WICONTROL_QA.md](SPEC_DRIVEN_DEVELOPMENT_WICONTROL_QA.md): especificação funcional e contratos.
 - [qa_api_reference.md](qa_api_reference.md): referência da API de QA.
 - [PLANO_IMPLEMENTACAO_AUDIO_SUPABASE_UI.md](PLANO_IMPLEMENTACAO_AUDIO_SUPABASE_UI.md): plano de mídia, áudio e UI (o áudio foi removido depois).
-- [DOCUMENTACAO.md](DOCUMENTACAO.md): visão antiga da arquitetura (desatualizada).
 - [WiControl/docs/](../WiControl/docs/): documentação do sistema WiControl (arquitetura, edge functions, deploy, portal do cliente).

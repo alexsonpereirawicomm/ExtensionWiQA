@@ -1,11 +1,12 @@
 <!doctype html>
-<html lang="pt-BR">
+<html lang="pt-BR" class="theme-auto">
 
 		<head>
 				<meta charset="utf-8">
 				<meta name="viewport" content="width=device-width, initial-scale=1">
-				<meta name="color-scheme" content="light">
+				<meta name="color-scheme" content="light dark">
 				<title>WiControl QA</title>
+				<link rel="icon" href="../assets/icon-32.png">
 				<link rel="stylesheet" href="sidepanel.css">
 		</head>
 
@@ -62,6 +63,16 @@
 								<path d="M3.5 16.5 16.5 3.5l4 4-13 13z"></path>
 								<path d="m7.5 12.5 2 2M10.5 9.5l1.5 1.5M13.5 6.5l2 2"></path>
 						</symbol>
+							<symbol id="icon-pencil" viewBox="0 0 24 24">
+								<path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z"></path>
+								<path d="m13.5 6.5 4 4"></path>
+							</symbol>
+							<symbol id="icon-chevron-left" viewBox="0 0 24 24">
+								<path d="m15 18-6-6 6-6"></path>
+							</symbol>
+							<symbol id="icon-chevron-right" viewBox="0 0 24 24">
+								<path d="m9 18 6-6-6-6"></path>
+							</symbol>
 						<symbol id="icon-eye" viewBox="0 0 24 24">
 								<path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"></path>
 								<circle cx="12" cy="12" r="2.5"></circle>
@@ -71,11 +82,8 @@
 				<div class="app-shell">
 						<header class="app-header">
 								<div class="brand" aria-label="WiControl QA">
-										<span class="brand-mark" aria-hidden="true" style="display: none;">
-												<svg viewBox="0 0 32 32" role="img">
-														<path class="brand-mark-main" d="M4 8v12a5 5 0 0 0 10 0V11h5v9a5 5 0 0 0 10 0V5"></path>
-														<path class="brand-mark-accent" d="M24 4h6v6"></path>
-												</svg>
+										<span class="brand-mark" aria-hidden="true">
+												<img src="../assets/logo.svg" alt="" width="18" height="17">
 										</span>
 										<span class="brand-copy">
 												<strong>WiControl</strong>
@@ -244,6 +252,17 @@
 														</select>
 												</div>
 
+												<!-- Destaque dos itens em Validação: alterna o filtro entre "só esses" e "em aberto". -->
+												<button id="awaitingBanner" class="awaiting-banner hidden" type="button">
+													<span class="awaiting-icon" aria-hidden="true">
+														<svg><use href="#icon-check"></use></svg>
+													</span>
+													<span class="awaiting-copy">
+														<strong id="awaitingTitle"></strong>
+														<small id="awaitingAction"></small>
+													</span>
+												</button>
+
 												<p id="itemsSummary" class="list-summary"></p>
 												<div id="itemsList" class="qa-list"></div>
 												<div id="itemsState" class="list-state hidden" role="status"></div>
@@ -256,6 +275,7 @@
 																		<span id="pageDomain" class="page-domain">Aba atual</span>
 																		<h2 id="pageContextTitle">Carregando página…</h2>
 																		<p id="pageUrlDisplay" title=""></p>
+														<p id="pageNotice" class="page-notice hidden">Abra uma página do site (http/https) para registrar.</p>
 																</div>
 																<button id="btnCopyUrl" class="icon-button icon-button-small" type="button" aria-label="Copiar URL da página" title="Copiar URL">
 																		<svg aria-hidden="true">
@@ -278,13 +298,40 @@
 														</button>
 												</div>
 
+												<!-- Novo QA em slides: o stepper mostra as próximas etapas e permite voltar; avançar exige a etapa atual completa. -->
+												<nav id="stepper" class="stepper" aria-label="Etapas do QA">
+													<div class="stepper-progress" aria-hidden="true"><i id="stepperBar"></i></div>
+													<ol>
+														<li>
+															<button class="stepper-item" type="button" data-step="0">
+																<span class="stepper-index" aria-hidden="true">1</span>
+																<span class="stepper-label">Local</span>
+															</button>
+														</li>
+														<li>
+															<button class="stepper-item" type="button" data-step="1">
+																<span class="stepper-index" aria-hidden="true">2</span>
+																<span class="stepper-label">Descrição</span>
+															</button>
+														</li>
+														<li>
+															<button class="stepper-item" type="button" data-step="2">
+																<span class="stepper-index" aria-hidden="true">3</span>
+																<span class="stepper-label">Detalhes</span>
+															</button>
+														</li>
+													</ol>
+												</nav>
+
+												<div id="stepViewport" class="step-viewport">
+													<div id="stepTrack" class="step-track">
+														<div class="qa-slide" data-step="0" role="group" aria-labelledby="captureTitle">
 												<section class="capture-section" aria-labelledby="captureTitle">
 														<div class="section-heading">
 																<div>
-																		<span class="eyebrow">Evidência</span>
-																		<h2 id="captureTitle">Registrar problema</h2>
+																		<span class="eyebrow">Local</span>
+																		<h2 id="captureTitle">Onde está o problema?</h2>
 																</div>
-																<span class="section-step">1 de 2</span>
 														</div>
 
 														<div class="viewport-picker">
@@ -357,12 +404,18 @@
 																</button>
 																<figcaption>
 																		<span id="elementPreviewNote">Prévia do elemento</span>
-																		<button id="btnAttachElement" class="text-action" type="button">
+																		<button id="btnAnnotateElement" class="text-action" type="button">
+																		<svg aria-hidden="true">
+																			<use href="#icon-pencil"></use>
+																		</svg>
+																		Anotar
+																	</button>
+																	<span id="elementAttachedBadge" class="attached-badge hidden">
 																				<svg aria-hidden="true">
-																						<use href="#icon-camera"></use>
+																						<use href="#icon-check"></use>
 																				</svg>
-																				Anexar como imagem
-																		</button>
+																				Anexada ao relato
+																		</span>
 																</figcaption>
 														</figure>
 												</section>
@@ -410,25 +463,73 @@
 														</div>
 														<div id="evidenceList" class="evidence-list"></div>
 												</section>
-
-												<section class="composer-section" aria-labelledby="composerTitle">
-														<div class="section-heading">
-																<div>
-																		<span class="eyebrow">Detalhes</span>
-																		<h2 id="composerTitle">Novo item de QA</h2>
-																</div>
-																<span class="section-step">2 de 2</span>
 														</div>
 
-														<form id="qaForm" class="qa-form" novalidate>
+												<form id="qaForm" class="step-form" novalidate>
+													<section id="stepDescribe" class="qa-slide" data-step="1" aria-labelledby="describeTitle">
+														<div class="section-heading">
+															<div>
+																<span class="eyebrow">Descrição</span>
+																<h2 id="describeTitle">O que está errado?</h2>
+															</div>
+														</div>
+														<aside id="duplicateNotice" class="duplicate-notice hidden" aria-live="polite">
+															<strong id="duplicateTitle"></strong>
+															<ul id="duplicateList"></ul>
+															<button id="btnViewDuplicates" class="text-action" type="button">Ver na lista de itens</button>
+														</aside>
 																<div class="field field-description">
-																		<label for="description">Descrição do problema</label>
-																		<textarea id="description" name="description" rows="5" maxlength="5000" placeholder="Explique o que aconteceu, onde ocorreu e qual era o resultado esperado." required></textarea>
-																		<div class="field-meta">
-																				<span id="descriptionCount">0 / 5000</span>
-																		</div>
+																<div class="problem-type" role="radiogroup" aria-label="Tipo do problema">
+																	<span class="problem-type-label">Tipo do problema</span>
+																	<div class="problem-type-options">
+																		<label><input type="radio" name="problemType" value="layout"><span>Layout</span></label>
+																		<label><input type="radio" name="problemType" value="funcional"><span>Funcional</span></label>
+																		<label><input type="radio" name="problemType" value="conteudo"><span>Conteúdo</span></label>
+																		<label><input type="radio" name="problemType" value="responsivo"><span>Responsivo</span></label>
+																		<label><input type="radio" name="problemType" value="outros"><span>Outros</span></label>
+																	</div>
 																</div>
+																<!-- Exemplo do tipo escolhido para orientar o preenchimento; não altera a descrição. -->
+																<aside id="problemTypeExample" class="type-example hidden" aria-live="polite">
+																	<span class="type-example-title">Exemplo</span>
+																	<p><strong id="typeExampleProblemLabel">Erro:</strong> <span id="typeExampleProblem"></span></p>
+																	<p id="typeExampleExpectedRow"><strong>Esperado:</strong> <span id="typeExampleExpected"></span></p>
+																</aside>
+																	<!-- Erro e esperado em campos separados; no envio viram um texto só no campo descrição. -->
+																	<div id="splitDescription" class="description-split">
+																		<div class="field">
+																			<label for="descriptionProblem">Qual erro acontece?</label>
+																			<textarea id="descriptionProblem" rows="3" maxlength="2400" placeholder="O que você viu de errado e onde."></textarea>
+																		</div>
+																		<div class="field">
+																			<label for="descriptionExpected">O que era esperado?</label>
+																			<textarea id="descriptionExpected" rows="3" maxlength="2400" placeholder="Como deveria ficar ou funcionar."></textarea>
+																		</div>
+																	</div>
+																	<div id="otherDescription" class="field hidden">
+																		<label for="descriptionOther">Descreva o caso</label>
+																		<textarea id="descriptionOther" rows="6" maxlength="5000" placeholder="Dúvida, sugestão ou observação, com o contexto necessário."></textarea>
+																	</div>
+																	<textarea id="description" name="description" hidden></textarea>
+																	<div class="field-meta">
+																		<span id="descriptionHelp">Os dois campos são obrigatórios e vão juntos na descrição do item.</span>
+																		<span id="descriptionCount">0 / 5000</span>
+																	</div>
+																</div>
+													</section>
 
+													<section id="stepClassify" class="qa-slide" data-step="2" aria-labelledby="classifyTitle">
+														<div class="section-heading">
+															<div>
+																<span class="eyebrow">Classificação</span>
+																<h2 id="classifyTitle">Detalhes do item</h2>
+															</div>
+														</div>
+														<dl id="stepSummary" class="step-summary">
+															<div><dt>Elemento</dt><dd id="summaryElement">—</dd><button class="text-action" type="button" data-goto-step="0">Editar</button></div>
+															<div><dt>Anexos</dt><dd id="summaryMedia">—</dd><button class="text-action" type="button" data-goto-step="0">Adicionar</button></div>
+															<div><dt>Erro</dt><dd id="summaryProblem">—</dd><button class="text-action" type="button" data-goto-step="1">Editar</button></div>
+														</dl>
 																<div class="form-grid form-grid-two">
 																		<div class="field">
 																				<label for="device">Dispositivo</label>
@@ -457,10 +558,9 @@
 																						<option value="Checkout"></option>
 																						<option value="Outra"></option>
 																				</datalist>
+																				<small id="locationHint" class="field-hint hidden">Sugerido pela URL · altere se precisar</small>
 																		</div>
 																</div>
-
-																<button id="btnUseLocationSuggestion" class="suggestion-chip hidden" type="button"></button>
 
 																<div class="form-grid form-grid-two">
 																		<div class="field">
@@ -516,8 +616,10 @@
 																				</div>
 																		</div>
 																</details>
-														</form>
-												</section>
+													</section>
+												</form>
+													</div>
+												</div>
 
 												<details id="diagnosticsSection" class="diagnostics-section">
 														<summary>
@@ -546,10 +648,22 @@
 						</main>
 
 						<footer id="submitBar" class="submit-bar hidden">
+								<button id="btnStepBack" class="button button-ghost step-back hidden" type="button" aria-label="Voltar para a etapa anterior">
+									<svg aria-hidden="true"><use href="#icon-chevron-left"></use></svg>
+									<span>Voltar</span>
+								</button>
 								<div class="submit-copy">
 										<span id="draftStatus">Rascunho salvo</span>
 										<small id="validationHint">Selecione um elemento e descreva o problema.</small>
 								</div>
+								<!-- Descarta o rascunho inteiro (com confirmação); aparece quando há algo preenchido. -->
+								<button id="btnDiscardDraft" class="icon-button discard-button hidden" type="button" aria-label="Descartar este QA" title="Descartar QA">
+									<svg aria-hidden="true"><use href="#icon-trash"></use></svg>
+								</button>
+								<button id="btnStepNext" class="button button-primary submit-button" type="button">
+									<span>Continuar</span>
+									<svg aria-hidden="true"><use href="#icon-chevron-right"></use></svg>
+								</button>
 								<button id="btnSubmit" class="button button-primary submit-button" type="button">
 										<span id="submitButtonLabel">Criar item de QA</span>
 										<span id="submitSpinner" class="spinner hidden" aria-hidden="true"></span>
@@ -578,6 +692,67 @@
 								</div>
 						</div>
 						<div id="mediaViewerBody" class="media-viewer-body"></div>
+				</dialog>
+
+				<dialog id="annotator" class="annotator" aria-labelledby="annotatorTitle">
+					<div class="annotator-bar">
+						<strong id="annotatorTitle">Anotar elemento</strong>
+						<div class="annotator-tools" role="toolbar" aria-label="Ferramentas de anotação">
+							<button class="annotator-tool is-active" type="button" data-tool="rect" aria-pressed="true">Retângulo</button>
+							<button class="annotator-tool" type="button" data-tool="arrow" aria-pressed="false">Seta</button>
+							<button class="annotator-tool" type="button" data-tool="pen" aria-pressed="false">Caneta</button>
+							<span class="annotator-colors">
+								<button class="annotator-color is-active" type="button" data-color="#ff004b" aria-label="Rosa" aria-pressed="true"></button>
+								<button class="annotator-color" type="button" data-color="#facc15" aria-label="Amarelo" aria-pressed="false"></button>
+								<button class="annotator-color" type="button" data-color="#2563eb" aria-label="Azul" aria-pressed="false"></button>
+							</span>
+							<button id="btnAnnotatorUndo" class="annotator-tool" type="button">Desfazer</button>
+						</div>
+					</div>
+					<div class="annotator-stage">
+						<canvas id="annotatorCanvas" aria-label="Prévia do elemento para anotar"></canvas>
+					</div>
+					<div class="annotator-actions">
+						<button id="btnAnnotatorCancel" class="button button-ghost button-small" type="button">Cancelar</button>
+						<button id="btnAnnotatorSave" class="button button-primary button-small" type="button">Salvar anotação</button>
+					</div>
+				</dialog>
+
+				<section id="coach" class="coach hidden" role="dialog" aria-labelledby="coachTitle" aria-describedby="coachText">
+					<span id="coachStep" class="coach-step"></span>
+					<strong id="coachTitle"></strong>
+					<p id="coachText"></p>
+					<div class="coach-actions">
+						<button id="btnCoachSkip" class="button button-ghost button-small" type="button">Pular</button>
+						<button id="btnCoachNext" class="button button-primary button-small" type="button">Próximo</button>
+					</div>
+				</section>
+
+				<dialog id="discardDialog" class="confirm-dialog" aria-labelledby="discardTitle" aria-describedby="discardText">
+					<strong id="discardTitle">Descartar este QA?</strong>
+					<p id="discardText">O elemento selecionado, os anexos e a descrição serão apagados. O item não será enviado.</p>
+					<div class="confirm-actions">
+						<button id="btnDiscardCancel" class="button button-ghost button-small" type="button">Continuar editando</button>
+						<button id="btnDiscardConfirm" class="button button-danger button-small" type="button">Descartar</button>
+					</div>
+				</dialog>
+
+				<dialog id="commentsViewer" class="comments-viewer" aria-labelledby="commentsViewerTitle">
+					<div class="comments-viewer-bar">
+						<div>
+							<span id="commentsViewerMeta" class="eyebrow"></span>
+							<strong id="commentsViewerTitle">Comentários</strong>
+						</div>
+						<button id="btnCommentsClose" class="icon-button icon-button-small" type="button" aria-label="Fechar comentários" title="Fechar (Esc)">
+							<svg aria-hidden="true">
+								<use href="#icon-x"></use>
+							</svg>
+						</button>
+					</div>
+					<div class="comments-viewer-body">
+						<p id="commentsViewerDescription" class="comments-viewer-description"></p>
+						<ol id="commentsViewerList" class="comments-thread"></ol>
+					</div>
 				</dialog>
 
 				<template id="evidenceTemplate">

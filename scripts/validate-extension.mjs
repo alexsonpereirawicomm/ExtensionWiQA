@@ -22,6 +22,11 @@ const referencedFiles = [
   ...Object.values(manifest.action?.default_icon || {}),
 ].filter(Boolean);
 
+const iconFiles = [...Object.values(manifest.icons || {}), ...Object.values(manifest.action?.default_icon || {})];
+if (iconFiles.some((path) => !/\.png$/i.test(path))) {
+  errors.push('Ícones do manifesto devem ser PNG (o Chrome não carrega SVG); rode scripts/build-icons.mjs.');
+}
+
 for (const relativePath of referencedFiles) {
   try {
     await access(join(root, relativePath));
@@ -30,7 +35,7 @@ for (const relativePath of referencedFiles) {
   }
 }
 
-for (const htmlPath of ['sidepanel/sidepanel.html', 'popup/popup.html', 'offscreen/offscreen.html']) {
+for (const htmlPath of ['sidepanel/sidepanel.html', 'offscreen/offscreen.html', 'permissions/permissions.html']) {
   try {
     const html = await readFile(join(root, htmlPath), 'utf8');
     if (/<(script|link)[^>]+(?:src|href)=["']https?:\/\//i.test(html)) {

@@ -304,6 +304,18 @@ export class QaApiClient {
     });
   }
 
+  // Atualização parcial (PUT /item): só os campos enviados mudam.
+  updateItem(itemId, fields) {
+    return this.request('/item', {
+      method: 'PUT',
+      body: {
+        token: this.config.projectToken,
+        id: itemId,
+        item: fields,
+      },
+    });
+  }
+
   initMedia(metadata, idempotencyKey) {
     return this.request('/media/init', {
       method: 'POST',

@@ -25,7 +25,7 @@ import {
 import { SUPABASE_ANON_KEY, SUPABASE_URL } from '../shared/config.js';
 
 const OFFSCREEN_PATH = 'offscreen/offscreen.html';
-const BACKGROUND_PROTOCOL_VERSION = 8;
+const BACKGROUND_PROTOCOL_VERSION = 9;
 // Chaves deixadas pelo ditado por voz, que foi removido da extensão.
 const REMOVED_AUDIO_STORAGE_KEYS = ['wiqaTranscriptionState', 'wiqaVoiceConsent'];
 // Capturas em telas HiDPI passam de 5000px de largura; 2560px no maior lado
@@ -86,6 +86,77 @@ chrome.runtime.onStartup.addListener(() => {
   void initializeExtension();
 });
 
+// Menu de contexto "Reportar este elemento": abre o painel e deixa um pedido
+// pendente que o painel consome (ele pode ainda estar carregando). O clique no
+// menu concede activeTab, e sidePanel.open precisa sair antes de qualquer await.
+const CONTEXT_MENU_REPORT = 'wiqa-report-element';
+const PENDING_ACTION_KEY = 'wiqaPendingAction';
+
+chrome.contextMenus?.onClicked.addListener((info, tab) => {
+  if (info.menuItemId !== CONTEXT_MENU_REPORT || !tab?.id) return;
+  chrome.sidePanel?.open({ windowId: tab.windowId }).catch(() => undefined);
+  void chrome.storage.session.set({
+    [PENDING_ACTION_KEY]: { type: 'select-element', tabId: tab.id, at: Date.now() },
+  });
+});
+
+// Contador no ícone: QAs abertos da página da aba, a partir do índice que a
+// listagem de itens mantém (não faz chamadas à API só para o contador).
+const ITEMS_INDEX_KEY = 'wiqaItemsIndex';
+const CLOSED_ITEM_STATUSES = ['Concluído', 'Cancelado'];
+
+chrome.tabs.onActivated.addListener(({ tabId }) => {
+  chrome.tabs.get(tabId).then(refreshBadge).catch(() => undefined);
+});
+
+chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
+  if (changeInfo.url || changeInfo.status === 'complete') void refreshBadge(tab);
+});
+
+// Mesma regra de sidepanel.js: host sem www + caminho, sem query nem hash.
+function pageKey(url) {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.hostname.replace(/^www\./, '')}${parsed.pathname.replace(/\/+$/, '') || '/'}`.toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+async function storeItemsIndex(keys) {
+  await chrome.storage.session.set({ [ITEMS_INDEX_KEY]: keys.filter(Boolean) });
+  const tab = await getActiveTab().catch(() => null);
+  if (tab) await refreshBadge(tab);
+}
+
+async function refreshBadge(tab) {
+  if (!Number.isInteger(tab?.id)) return;
+  // Sem acesso à página o Chrome não informa a URL; o contador fica vazio.
+  const key = pageKey(tab.url || '');
+  const stored = await chrome.storage.session.get(ITEMS_INDEX_KEY);
+  const count = key ? (stored[ITEMS_INDEX_KEY] || []).filter((entry) => entry === key).length : 0;
+  await chrome.action.setBadgeText({ tabId: tab.id, text: count ? String(count) : '' }).catch(() => undefined);
+  await chrome.action.setTitle({
+    tabId: tab.id,
+    title: count
+      ? `WiControl QA · ${count} ${count === 1 ? 'QA aberto' : 'QAs abertos'} nesta página`
+      : 'Abrir WiControl QA (Alt+Shift+Q)',
+  }).catch(() => undefined);
+}
+
+// Atalho de captura rápida: o atalho concede activeTab para a aba atual.
+// sidePanel.open precisa sair antes de qualquer await para manter o gesto.
+chrome.commands?.onCommand.addListener((command, tab) => {
+  if (command !== 'quick-screenshot') return;
+  if (tab?.windowId !== undefined) {
+    chrome.sidePanel?.open({ windowId: tab.windowId }).catch(() => undefined);
+  }
+  takeScreenshot().catch((error) => {
+    console.warn('WiControl QA: captura rápida falhou.', safeErrorForLog(error));
+    void broadcast('WI_QA_ERROR', errorPayload(error));
+  });
+});
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.target !== 'background') return false;
 
@@ -107,6 +178,19 @@ async function initializeExtension() {
     await chrome.sidePanel?.setPanelBehavior({ openPanelOnActionClick: true });
   } catch (error) {
     console.warn('WiControl QA: não foi possível configurar o Side Panel.', safeErrorForLog(error));
+  }
+
+  try {
+    // removeAll evita "id duplicado" quando o onStartup roda depois do onInstalled.
+    await chrome.contextMenus.removeAll();
+    chrome.contextMenus.create({
+      id: CONTEXT_MENU_REPORT,
+      title: 'Reportar este elemento no WiControl QA',
+      contexts: ['page', 'link', 'image', 'selection', 'video'],
+    });
+    await chrome.action.setBadgeBackgroundColor({ color: '#e00043' });
+  } catch (error) {
+    console.warn('WiControl QA: não foi possível criar o menu de contexto.', safeErrorForLog(error));
   }
 
   try {
@@ -152,7 +236,9 @@ async function dispatchMessage(message, sender) {
         draftId: message.payload?.draftId || message.draftId || '',
       });
     case 'WI_QA_SELECT_ELEMENT':
-      return selectPageElement(message.payload?.draftId || message.draftId || '');
+      return selectPageElement(message.payload?.draftId || message.draftId || '', {
+        preferContextTarget: Boolean(message.payload?.preferContextTarget),
+      });
     case 'WI_QA_START_DIAGNOSTICS':
       return startActiveDiagnostics(message.payload?.draftId || message.draftId || '');
     case 'WI_QA_CLEAR_DIAGNOSTICS':
@@ -185,6 +271,8 @@ async function dispatchMessage(message, sender) {
       return createQaItem(message.payload?.draft || message.draft || message.payload || {});
     case 'WI_QA_LIST_ITEMS':
       return listQaItems();
+    case 'WI_QA_COMPLETE_ITEM':
+      return completeQaItem(message.payload || message);
     case 'WI_QA_SET_VIEWPORT':
       return setViewportPreset(
         message.payload?.preset || message.preset,
@@ -356,6 +444,7 @@ async function disconnectProject() {
     STORAGE_KEYS.PROJECT,
     STORAGE_KEYS.DRAFT,
   ]);
+  await storeItemsIndex([]).catch(() => undefined);
   await broadcast('WI_QA_CONTEXT_UPDATED', { config: null, project: null });
   return { success: true };
 }
@@ -838,6 +927,9 @@ async function createQaItem(rawDraft) {
     STORAGE_KEYS.CAPTURED_MEDIA_LEGACY,
   ]);
   if (tab?.id) await clearDiagnostics(tab.id);
+  // O item novo já conta no ícone, sem esperar a próxima listagem.
+  const index = (await chrome.storage.session.get(ITEMS_INDEX_KEY))[ITEMS_INDEX_KEY] || [];
+  await storeItemsIndex([...index, pageKey(draft.pageUrl)]).catch(() => undefined);
   await broadcast('WI_QA_ITEM_CREATED', { item: response.item });
   return { success: true, item: response.item };
 }
@@ -1269,12 +1361,19 @@ async function startDiagnostics(tabId, draftId, options = {}) {
   }
 }
 
-async function selectPageElement(draftId) {
+// preferContextTarget: vindo do menu de contexto, usa o elemento clicado com o
+// botão direito (se o content script já estava na página); senão, cai na
+// seleção por clique.
+async function selectPageElement(draftId, { preferContextTarget = false } = {}) {
   const tab = await getActiveTab();
   assertInjectableTab(tab);
   await ensureContentScript(tab.id);
   if (draftId) await startDiagnostics(tab.id, draftId);
-  const response = await chrome.tabs.sendMessage(tab.id, { target: 'content', type: 'WI_QA_SELECT_ELEMENT' });
+  const response = await chrome.tabs.sendMessage(tab.id, {
+    target: 'content',
+    type: 'WI_QA_SELECT_ELEMENT',
+    preferContextTarget,
+  });
   if (!response?.success || !response.element) {
     throw new QaApiError(response?.error || 'Não foi possível selecionar o elemento.', {
       code: 'ELEMENT_SELECTION_FAILED',
@@ -1362,7 +1461,31 @@ async function listQaItems() {
       .map((url) => rebaseStorageUrl(url, config.supabaseUrl)),
     comments: commentsByItem.get(item.id) || [],
   }));
+  await storeItemsIndex(items
+    .filter((item) => !CLOSED_ITEM_STATUSES.includes(item.status))
+    .map((item) => pageKey(item.page_url)))
+    .catch(() => undefined);
   return { success: true, items, fetchedAt: Date.now() };
+}
+
+// Conclusão pela listagem: o painel só oferece a ação para itens em
+// "Validação" (conferidos na página e nas imagens); aqui só "Concluído" passa.
+async function completeQaItem(payload) {
+  const itemId = String(payload.itemId || '').trim();
+  if (!itemId) {
+    throw new QaApiError('Item inválido.', { code: 'ITEM_INVALID', status: 400, retryable: false });
+  }
+  const config = await requireConfig();
+  const response = await new QaApiClient(config).updateItem(itemId, { status: 'Concluído' });
+
+  // O item deixa de contar como aberto no ícone.
+  const key = pageKey(payload.pageUrl || '');
+  const index = (await chrome.storage.session.get(ITEMS_INDEX_KEY))[ITEMS_INDEX_KEY] || [];
+  const position = key ? index.indexOf(key) : -1;
+  if (position >= 0) {
+    await storeItemsIndex([...index.slice(0, position), ...index.slice(position + 1)]).catch(() => undefined);
+  }
+  return { success: true, item: response.item || { id: itemId, status: 'Concluído' } };
 }
 
 // ---------------------------------------------------------------------------

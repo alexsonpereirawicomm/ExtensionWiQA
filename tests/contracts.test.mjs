@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  QaApiClient,
   QaApiError,
   assertSignedUploadUrl,
   normalizeSupabaseUrl,
@@ -110,4 +111,34 @@ test('seleção de elemento pode ser exigida sem tornar screenshot obrigatório'
     validateDraft({ ...draft, hasSelectedElement: false }, { requireImage: false, requireElement: true }).element,
     'Selecione o elemento onde o problema acontece.',
   );
+});
+
+test('updateItem envia PUT /item só com os campos alterados', async () => {
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return new Response(JSON.stringify({ item: { id: 'item-1', status: 'Concluído' } }), { status: 200 });
+  };
+  try {
+    const client = new QaApiClient({
+      supabaseUrl: 'https://demo.supabase.co',
+      supabaseKey: 'sb_publishable_test',
+      projectToken: 'project-token',
+      authMode: 'client',
+      clientAccessToken: 'client-token',
+    });
+    const response = await client.updateItem('item-1', { status: 'Concluído' });
+    assert.equal(response.item.status, 'Concluído');
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, 'https://demo.supabase.co/functions/v1/client-project-qa/item');
+    assert.equal(calls[0].init.method, 'PUT');
+    assert.deepEqual(JSON.parse(calls[0].init.body), {
+      token: 'project-token',
+      id: 'item-1',
+      item: { status: 'Concluído' },
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

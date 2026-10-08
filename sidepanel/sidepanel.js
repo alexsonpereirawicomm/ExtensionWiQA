@@ -15,6 +15,7 @@
  *   WI_QA_MEDIA_REMOVE          payload: { mediaId, recordingId }
  *   WI_QA_CREATE_ITEM           payload: { draft }
  *   WI_QA_DRAFT_RESET           payload: { draftId }
+ *   WI_QA_COMPLETE_ITEM         payload: { itemId, pageUrl }
  *
  * Eventos aceitos:
  *   WI_QA_CONTEXT_UPDATED, WI_QA_MEDIA_UPDATED, WI_QA_RECORDER_STATE,
@@ -26,7 +27,7 @@
 (() => {
   'use strict';
 
-  const REQUIRED_BACKGROUND_PROTOCOL = 8;
+  const REQUIRED_BACKGROUND_PROTOCOL = 9;
   const MESSAGE = Object.freeze({
     GET_CONTEXT: 'WI_QA_GET_CONTEXT',
     VALIDATE_CONFIG: 'WI_QA_VALIDATE_CONFIG',
@@ -44,6 +45,7 @@
     CREATE_ITEM: 'WI_QA_CREATE_ITEM',
     DRAFT_RESET: 'WI_QA_DRAFT_RESET',
     LIST_ITEMS: 'WI_QA_LIST_ITEMS',
+    COMPLETE_ITEM: 'WI_QA_COMPLETE_ITEM',
     SET_VIEWPORT: 'WI_QA_SET_VIEWPORT',
     PIXEL_START: 'WI_QA_PIXEL_INSPECTOR_START',
     PIXEL_STOP: 'WI_QA_PIXEL_INSPECTOR_STOP'
@@ -58,6 +60,9 @@
   // Tablet não tem valor próprio no campo Dispositivo; mantém a escolha manual.
   const VIEWPORT_DEVICE = Object.freeze({ desktop: 'Desktop', mobile: 'Mobile' });
   const CLOSED_STATUSES = Object.freeze(['Concluído', 'Cancelado']);
+  // Itens que esperam a conferência de quem reportou; ficam em destaque quando
+  // a lista é filtrada por eles (pelo aviso do topo ou pelo filtro de status).
+  const AWAITING_STATUS = 'Validação';
   // As URLs das imagens na listagem são assinadas por 10 minutos.
   const ITEMS_STALE_MS = 5 * 60 * 1000;
 
@@ -69,8 +74,17 @@
     LEGACY_MEDIA: 'capturedMedia',
     LEGACY_RECORDING: 'isRecording',
     LEGACY_RECORDING_START: 'recordingStart',
-    PROTOCOL_RELOAD_AT: 'wiqaProtocolReloadAt'
+    PROTOCOL_RELOAD_AT: 'wiqaProtocolReloadAt',
+    PREFS: 'wiqaPrefs',
+    PENDING_SUBMIT: 'wiqaPendingSubmit',
+    ONBOARDING_DONE: 'wiqaOnboardingDone',
+    // chrome.storage.session, gravado pelo menu de contexto do background.
+    PENDING_ACTION: 'wiqaPendingAction'
   });
+  // Pedido do menu de contexto mais velho que isso é ignorado.
+  const PENDING_ACTION_MAX_AGE_MS = 30_000;
+  // Espera entre as tentativas automáticas de envio (a última é a 5ª).
+  const SUBMIT_RETRY_DELAYS_MS = Object.freeze([10_000, 30_000, 60_000, 120_000, 300_000]);
 
   const MEDIA_DATABASE = Object.freeze({
     NAME: 'wicontrol-qa-media',
@@ -86,6 +100,45 @@
       'Info', 'Layout', 'Gestão', 'Cadastro', 'Plataforma'
     ]
   });
+
+  // Erro e esperado são digitados em campos separados e, no envio, viram um
+  // texto só no campo descrição do item, com estes títulos.
+  const DESCRIPTION_LABELS = Object.freeze({
+    problem: 'O que acontece:',
+    expected: 'O que deveria acontecer:'
+  });
+  // "Outros" (dúvida, sugestão, observação) usa um campo livre único.
+  const OTHER_PROBLEM_TYPE = 'outros';
+  // Exemplos por tipo de problema: [qual erro acontece, o que era esperado];
+  // "Outros" tem um exemplo só.
+  const PROBLEM_TYPE_EXAMPLES = Object.freeze({
+    layout: [
+      'O botão "Comprar" está sobreposto ao preço e cortado à direita.',
+      'O botão fica abaixo do preço, inteiro, como no layout aprovado.'
+    ],
+    funcional: [
+      'Ao clicar em "Adicionar ao carrinho" nada acontece e o minicart não abre.',
+      'O produto é adicionado e o minicart abre mostrando o item.'
+    ],
+    conteudo: [
+      'O preço exibido é R$ 49,90, mas o produto custa R$ 59,90.',
+      'Exibir o preço cadastrado: R$ 59,90.'
+    ],
+    responsivo: [
+      'No mobile (390 px) o menu ocupa a tela toda e não fecha.',
+      'O menu abre como gaveta e fecha no X ou ao tocar fora.'
+    ],
+    outros: [
+      'Confirmar com o cliente se o banner da Black Friday deve sair do ar às 23h59 de domingo.',
+      ''
+    ]
+  });
+  // Etapas do slider: 0 Local, 1 Descrição, 2 Detalhes.
+  const STEP_LAST = 2;
+  // Mesma duração da transição do trilho em sidepanel.css.
+  const SLIDE_MS = 380;
+  // Mesmo valor do gap de .step-track em sidepanel.css.
+  const STEP_GAP_PX = 24;
 
   // Mesmo valor do placeholder em sidepanel.html.
   const GUEST_CREDENTIAL_EXAMPLE = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890';
@@ -123,12 +176,28 @@
     itemsLoading: false,
     itemsError: '',
     expandedItems: new Set(),
+    // URLs de imagem que falharam ao carregar: não são exibidas nem contadas.
+    brokenImages: new Set(),
     viewport: 'full',
     viewportMode: 'full',
     viewportActual: null,
     viewportBusy: false,
     viewer: null,
-    pixelInspector: false
+    pixelInspector: false,
+    // Etapa visível no slider do Novo QA.
+    currentStep: 0,
+    // Últimos dispositivo/prioridade usados, por projeto: { [projectId]: { device, priority } }.
+    prefs: {},
+    // Prévia do elemento anotada: { source: dataUrl original, dataUrl: anotada }.
+    elementAnnotation: null,
+    annotator: null,
+    // Reenvio automático do item após falha de rede/servidor.
+    submitRetry: { attempt: 0, nextAt: 0, timer: null, ticker: null },
+    coachIndex: -1,
+    // Conclusão de itens em "Validação" pela lista (dois cliques).
+    confirmingItemId: '',
+    confirmTimer: null,
+    completingItemId: ''
   };
 
   document.addEventListener('DOMContentLoaded', initialize);
@@ -145,10 +214,14 @@
       STORAGE.PROJECT,
       STORAGE.LEGACY_MEDIA,
       STORAGE.LEGACY_RECORDING,
-      STORAGE.LEGACY_RECORDING_START
+      STORAGE.LEGACY_RECORDING_START,
+      STORAGE.PREFS,
+      STORAGE.PENDING_SUBMIT,
+      STORAGE.ONBOARDING_DONE
     ]);
 
     state.project = localState[STORAGE.PROJECT] || null;
+    state.prefs = localState[STORAGE.PREFS] || {};
     state.media = normalizeMediaCollection(
       localState[STORAGE.MEDIA],
       localState[STORAGE.LEGACY_MEDIA]
@@ -178,10 +251,13 @@
 
     populateSetupForm(state.config);
     populateResponsibleOptions(state.members);
-    restoreDraft((contextResponse && contextResponse.context && contextResponse.context.draft) || localState[STORAGE.DRAFT]);
+    const restored = restoreDraft((contextResponse && contextResponse.context && contextResponse.context.draft) || localState[STORAGE.DRAFT]);
+    if (!restored) applyProjectPrefs();
     await startDiagnosticSession();
     applyPageContext(state.tab);
     renderAll();
+    // Rascunho restaurado abre direto na primeira etapa pendente, sem animar.
+    goToStep(maxReachableStep(), { animate: false, focus: false });
     state.initialized = true;
     updateDraftStatus('saved');
 
@@ -190,6 +266,9 @@
     } else if (state.connected) {
       showWorkspace();
       scheduleSessionExpiry();
+      resumePendingSubmit(localState[STORAGE.PENDING_SUBMIT]);
+      // O pedido do menu de contexto tem prioridade sobre o guia de boas-vindas.
+      if (!(await consumePendingAction()) && !localState[STORAGE.ONBOARDING_DONE]) startCoach();
     } else {
       showSetup(false);
     }
@@ -212,14 +291,25 @@
       'recorderSubtitle', 'recorderTimer', 'btnCancelRecording', 'btnPauseRecording',
       'pauseIconUse', 'pauseButtonLabel', 'btnStopRecording', 'evidenceSection', 'evidenceCount',
       'evidenceList', 'evidenceTemplate', 'qaForm', 'description', 'descriptionCount', 'device',
-      'location', 'btnUseLocationSuggestion', 'priority', 'status', 'responsible',
+      'location', 'locationHint', 'priority', 'status', 'responsible',
       'responsibleHint', 'pageUrl', 'authorName', 'authorEmail', 'submitBar',
       'draftStatus', 'validationHint', 'btnSubmit', 'submitButtonLabel', 'submitSpinner',
       'toastRegion', 'composeView', 'listView', 'itemsCountBadge', 'btnRefreshItems', 'itemsSearch',
       'itemsStatusFilter', 'itemsSummary', 'itemsList', 'itemsState', 'viewportControl',
       'viewportHint', 'btnPermissions', 'btnPermissionsHelp', 'elementPreview', 'btnElementPreview',
-      'elementPreviewImage', 'elementPreviewNote', 'btnAttachElement', 'mediaViewer', 'mediaViewerTitle',
-      'mediaViewerBody', 'btnViewerZoom', 'btnViewerOpen', 'btnViewerClose'
+      'elementPreviewImage', 'elementPreviewNote', 'elementAttachedBadge', 'mediaViewer', 'mediaViewerTitle',
+      'mediaViewerBody', 'btnViewerZoom', 'btnViewerOpen', 'btnViewerClose', 'pageNotice',
+      'descriptionHelp', 'stepper', 'stepperBar', 'stepViewport', 'stepTrack', 'btnStepBack',
+      'btnStepNext', 'problemTypeExample', 'typeExampleProblem', 'typeExampleExpected',
+      'summaryElement', 'summaryMedia', 'summaryProblem', 'btnAnnotateElement', 'duplicateNotice',
+      'descriptionProblem', 'descriptionExpected', 'descriptionOther', 'splitDescription', 'otherDescription',
+      'typeExampleProblemLabel', 'typeExampleExpectedRow', 'commentsViewer', 'commentsViewerMeta',
+      'commentsViewerTitle', 'commentsViewerDescription', 'commentsViewerList', 'btnCommentsClose',
+      'btnDiscardDraft', 'discardDialog', 'btnDiscardCancel', 'btnDiscardConfirm', 'awaitingBanner',
+      'awaitingTitle', 'awaitingAction',
+      'duplicateTitle', 'duplicateList', 'btnViewDuplicates', 'annotator', 'annotatorCanvas',
+      'btnAnnotatorUndo', 'btnAnnotatorCancel', 'btnAnnotatorSave', 'coach', 'coachStep', 'coachTitle',
+      'coachText', 'btnCoachSkip', 'btnCoachNext'
     ];
 
     ids.forEach((id) => {
@@ -264,14 +354,29 @@
 
     dom.btnScreenshot.addEventListener('click', captureScreenshot);
     dom.btnPixelInspector.addEventListener('click', togglePixelInspector);
-    dom.btnSelectElement.addEventListener('click', selectElement);
-    dom.btnChangeElement.addEventListener('click', selectElement);
+    dom.btnSelectElement.addEventListener('click', () => selectElement());
+    dom.btnChangeElement.addEventListener('click', () => selectElement());
     dom.btnClearDiagnostics.addEventListener('click', clearDiagnostics);
     dom.btnElementPreview.addEventListener('click', () => {
       const preview = state.diagnostics && state.diagnostics.elementPreview;
-      if (preview) openViewer({ src: preview.dataUrl, kind: 'image', title: `Elemento: ${preview.selector || 'selecionado'}` });
+      if (preview) openViewer({ src: shownElementPreview(preview.dataUrl), kind: 'image', title: `Elemento: ${preview.selector || 'selecionado'}` });
     });
-    dom.btnAttachElement.addEventListener('click', attachElementPreview);
+    // Os campos visíveis montam a descrição antes do listener do formulário
+    // (que salva o rascunho e valida) receber o mesmo evento.
+    [dom.descriptionProblem, dom.descriptionExpected, dom.descriptionOther].forEach((field) => {
+      field.addEventListener('input', syncDescription);
+    });
+    dom.btnCommentsClose.addEventListener('click', () => dom.commentsViewer.close());
+    dom.btnDiscardDraft.addEventListener('click', () => dom.discardDialog.showModal());
+    dom.btnDiscardCancel.addEventListener('click', () => dom.discardDialog.close());
+    dom.btnDiscardConfirm.addEventListener('click', discardDraft);
+    dom.discardDialog.addEventListener('click', (event) => {
+      if (event.target === dom.discardDialog) dom.discardDialog.close();
+    });
+    // Clique fora do conteúdo (no fundo do <dialog>) fecha.
+    dom.commentsViewer.addEventListener('click', (event) => {
+      if (event.target === dom.commentsViewer) dom.commentsViewer.close();
+    });
 
     dom.btnViewerClose.addEventListener('click', closeViewer);
     dom.mediaViewer.addEventListener('close', clearViewer);
@@ -290,11 +395,35 @@
     dom.btnStopRecording.addEventListener('click', stopRecording);
     dom.btnCancelRecording.addEventListener('click', cancelRecording);
 
-    dom.btnUseLocationSuggestion.addEventListener('click', () => {
-      dom.location.value = dom.btnUseLocationSuggestion.dataset.value || '';
-      dom.btnUseLocationSuggestion.classList.add('hidden');
-      fieldChanged();
-      dom.location.focus();
+    // Digitar no Local desfaz a sugestão automática: a troca de aba não o sobrescreve mais.
+    dom.location.addEventListener('input', () => {
+      delete dom.location.dataset.autofilled;
+      dom.locationHint.classList.add('hidden');
+    });
+    dom.btnViewDuplicates.addEventListener('click', showDuplicatesInList);
+    dom.btnAnnotateElement.addEventListener('click', openAnnotator);
+    dom.btnAnnotatorUndo.addEventListener('click', undoAnnotation);
+    dom.btnAnnotatorCancel.addEventListener('click', () => dom.annotator.close());
+    dom.btnAnnotatorSave.addEventListener('click', saveAnnotation);
+    dom.annotator.addEventListener('close', () => { state.annotator = null; });
+    dom.annotator.querySelectorAll('[data-tool]').forEach((button) => {
+      button.addEventListener('click', () => setAnnotatorOption('tool', button.dataset.tool));
+    });
+    dom.annotator.querySelectorAll('[data-color]').forEach((button) => {
+      button.addEventListener('click', () => setAnnotatorOption('color', button.dataset.color));
+    });
+    dom.annotatorCanvas.addEventListener('pointerdown', startAnnotationShape);
+    dom.annotatorCanvas.addEventListener('pointermove', moveAnnotationShape);
+    dom.annotatorCanvas.addEventListener('pointerup', endAnnotationShape);
+    dom.annotatorCanvas.addEventListener('pointercancel', endAnnotationShape);
+    dom.btnCoachNext.addEventListener('click', () => showCoachStep(state.coachIndex + 1));
+    dom.btnCoachSkip.addEventListener('click', finishCoach);
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && state.coachIndex >= 0) finishCoach();
+    });
+    // Voltou a conexão: tenta o envio pendente na hora, sem esperar o timer.
+    window.addEventListener('online', () => {
+      if (state.submitRetry.attempt) void submitDraft({ auto: true });
     });
 
     dom.qaForm.addEventListener('input', fieldChanged);
@@ -302,6 +431,33 @@
     dom.description.addEventListener('input', updateDescriptionCount);
     dom.responsible.addEventListener('change', fieldChanged);
     dom.btnSubmit.addEventListener('click', submitDraft);
+    dom.validationHint.addEventListener('click', () => guideToIssue(currentStepIssue()));
+    dom.btnStepNext.addEventListener('click', advanceStep);
+    dom.btnStepBack.addEventListener('click', () => goToStep(state.currentStep - 1));
+    dom.stepper.querySelectorAll('.stepper-item').forEach((item) => {
+      item.addEventListener('click', () => goToStep(Number(item.dataset.step)));
+    });
+    document.querySelectorAll('[data-goto-step]').forEach((button) => {
+      button.addEventListener('click', () => goToStep(Number(button.dataset.gotoStep)));
+    });
+    document.querySelectorAll('input[name="problemType"]').forEach((radio) => {
+      radio.addEventListener('change', renderProblemType);
+    });
+    // O formulário não tem botão de envio, mas Enter num campo não pode recarregar o painel.
+    dom.qaForm.addEventListener('submit', (event) => event.preventDefault());
+    // Focar um campo fora da área visível rola o viewport mesmo com overflow
+    // hidden; o slider é posicionado só por transform.
+    dom.stepViewport.addEventListener('scroll', () => { dom.stepViewport.scrollLeft = 0; });
+    const slideObserver = new ResizeObserver(syncSliderHeight);
+    dom.stepTrack.querySelectorAll('.qa-slide').forEach((slide) => slideObserver.observe(slide));
+    // Ctrl+Enter (Cmd+Enter no macOS): avança a etapa; na última, cria o item.
+    document.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' || !(event.ctrlKey || event.metaKey)) return;
+      if (dom.workspaceView.classList.contains('hidden') || state.activeTab !== 'compose' || state.viewer || dom.discardDialog.open) return;
+      event.preventDefault();
+      if (state.currentStep < STEP_LAST) advanceStep();
+      else void submitDraft();
+    });
 
     document.querySelectorAll('input[name="workspaceTab"]').forEach((radio) => {
       radio.addEventListener('change', () => setActiveTab(radio.value));
@@ -312,6 +468,10 @@
     dom.btnRefreshItems.addEventListener('click', () => loadItems({ force: true }));
     dom.itemsSearch.addEventListener('input', renderItems);
     dom.itemsStatusFilter.addEventListener('change', renderItems);
+    dom.awaitingBanner.addEventListener('click', () => {
+      dom.itemsStatusFilter.value = dom.itemsStatusFilter.value === AWAITING_STATUS ? 'open' : AWAITING_STATUS;
+      renderItems();
+    });
 
     // A simulação de tela e o contexto da página são por aba.
     chrome.tabs.onActivated.addListener(() => {
@@ -739,26 +899,31 @@
     dom.pageContextTitle.textContent = title;
     dom.pageUrlDisplay.textContent = pageUrl || 'URL indisponível';
     dom.pageUrlDisplay.title = pageUrl;
+    // chrome://, about: etc. não aceitam captura; avisa antes do clique falhar.
+    const unsupported = Boolean(pageUrl) && !isHttpUrl(pageUrl);
+    dom.pageNotice.classList.toggle('hidden', !unsupported);
+    dom.pageNotice.closest('.page-card').classList.toggle('is-unsupported', unsupported);
 
     if (!dom.pageUrl.value || !state.initialized) dom.pageUrl.value = pageUrl;
     updateLocationSuggestion(pageUrl, title);
+    renderDuplicates();
   }
 
+  // O Local vem preenchido com a sugestão da URL/título e acompanha a troca de
+  // aba enquanto a pessoa não digitar outro valor (dataset.autofilled).
   function updateLocationSuggestion(pageUrl, title) {
-    if (dom.location.value.trim()) {
-      dom.btnUseLocationSuggestion.classList.add('hidden');
-      return;
-    }
+    const autofilled = dom.location.dataset.autofilled || '';
+    if (dom.location.value.trim() && dom.location.value !== autofilled) return;
 
     const suggestion = suggestLocation(`${pageUrl || ''} ${title || ''}`);
-    if (!suggestion || suggestion === 'Outra') {
-      dom.btnUseLocationSuggestion.classList.add('hidden');
-      return;
-    }
+    const value = suggestion && suggestion !== 'Outra' ? suggestion : '';
+    if (!value && !autofilled) return;
 
-    dom.btnUseLocationSuggestion.dataset.value = suggestion;
-    dom.btnUseLocationSuggestion.textContent = `Usar sugestão: ${suggestion}`;
-    dom.btnUseLocationSuggestion.classList.remove('hidden');
+    dom.location.value = value;
+    if (value) dom.location.dataset.autofilled = value;
+    else delete dom.location.dataset.autofilled;
+    dom.locationHint.classList.toggle('hidden', !value);
+    if (state.initialized) fieldChanged();
   }
 
   function suggestLocation(rawContext) {
@@ -782,6 +947,8 @@
   async function ensurePageAccess() {
     let granted = false;
     try {
+      // Já liberado: não precisa de gesto do usuário (ex.: pedido vindo do menu de contexto).
+      if (await chrome.permissions.contains({ origins: ['<all_urls>'] })) return true;
       granted = await chrome.permissions.request({ origins: ['<all_urls>'] });
     } catch (error) {
       granted = false;
@@ -1088,6 +1255,7 @@
       hydrateMediaPreview(media, card, preview);
     });
 
+    renderAttachedBadge();
     updateSubmitState();
   }
 
@@ -1122,7 +1290,7 @@
     dom.btnSelectElement.classList.toggle('is-selected', Boolean(selected));
     dom.selectElementButtonLabel.textContent = selected ? 'Elemento selecionado' : 'Selecionar elemento';
     dom.selectedElementLabel.textContent = selected
-      ? `Elemento: ${selected.accessible_name && selected.accessible_name !== '[REDACTED]' ? `${selected.accessible_name} · ` : ''}${selected.selector || selected.tag}`
+      ? `Elemento: ${describeElement(selected)}`
       : '';
     renderElementPreview(selected ? diagnostics.elementPreview : null);
     updateSubmitState();
@@ -1135,43 +1303,52 @@
       dom.elementPreviewImage.removeAttribute('src');
       return;
     }
-    if (dom.elementPreviewImage.getAttribute('src') !== dataUrl) {
-      dom.elementPreviewImage.src = dataUrl;
-      dom.btnAttachElement.disabled = false;
+    const shown = shownElementPreview(dataUrl);
+    if (dom.elementPreviewImage.getAttribute('src') !== shown) {
+      dom.elementPreviewImage.src = shown;
     }
-    dom.elementPreviewNote.textContent = preview.clipped
-      ? 'Prévia da parte visível do elemento'
-      : 'Prévia do elemento';
+    dom.elementPreviewNote.textContent = shown !== dataUrl
+      ? 'Prévia anotada'
+      : preview.clipped ? 'Prévia da parte visível do elemento' : 'Prévia do elemento';
+    renderAttachedBadge();
   }
 
-  // Ao selecionar, a prévia é anexada sozinha ({ auto: true }); trocar de
-  // elemento substitui a imagem anexada automaticamente da seleção anterior.
-  async function attachElementPreview({ auto = false } = {}) {
+  // A prévia entra no rascunho como elemento-*.webp; o nome sobrevive a
+  // fechar e reabrir o painel, ao contrário de autoPreviewRecordingId.
+  function renderAttachedBadge() {
+    const attached = state.media.some((media) => /^elemento-/.test(media.name || ''));
+    dom.elementAttachedBadge.classList.toggle('hidden', !attached);
+  }
+
+  // Ao selecionar, a prévia é anexada sozinha; trocar de elemento substitui a
+  // imagem anexada da seleção anterior.
+  async function attachElementPreview() {
     const preview = state.diagnostics && state.diagnostics.elementPreview;
     if (!preview || !preview.dataUrl) return false;
-    dom.btnAttachElement.disabled = true;
     try {
-      if (auto) await removeAutoAttachedPreview();
+      await removeAutoAttachedPreview();
       const response = await sendCommand('WI_QA_SAVE_SCREENSHOT', {
         dataUrl: preview.dataUrl,
         filePrefix: 'elemento'
       }, { timeoutMs: 20000 });
       if (!isSuccess(response)) throw responseError(response, 'Não foi possível anexar a prévia.');
-      if (auto) state.autoPreviewRecordingId = (response.media && response.media.recordingId) || '';
-      else showToast('Prévia do elemento anexada como imagem.', 'success');
+      state.autoPreviewRecordingId = (response.media && response.media.recordingId) || '';
       return true;
     } catch (error) {
-      dom.btnAttachElement.disabled = false;
       showToast(readableError(error), 'error');
       return false;
     }
   }
 
+  // Sem o id da sessão (painel reaberto), usa o nome elemento-* da prévia anexada.
   async function removeAutoAttachedPreview() {
     const recordingId = state.autoPreviewRecordingId;
     state.autoPreviewRecordingId = '';
-    if (!recordingId || !state.media.some((entry) => entry.recordingId === recordingId)) return;
-    await sendCommand(MESSAGE.MEDIA_REMOVE, { recordingId }, { timeoutMs: 8000 }).catch(() => undefined);
+    const targets = recordingId
+      ? state.media.filter((entry) => entry.recordingId === recordingId)
+      : state.media.filter((entry) => /^elemento-/.test(entry.name || '') && entry.recordingId);
+    await Promise.all(targets.map((entry) => sendCommand(MESSAGE.MEDIA_REMOVE, { recordingId: entry.recordingId }, { timeoutMs: 8000 })
+      .catch(() => undefined)));
   }
 
   // --- Visualizador ampliado -------------------------------------------------
@@ -1247,21 +1424,30 @@
     });
   }
 
-  async function selectElement() {
+  // preferContextTarget: pedido do menu de contexto; usa o elemento clicado
+  // com o botão direito quando a página já tinha o content script.
+  async function selectElement({ preferContextTarget = false } = {}) {
     if (!ensureConnected() || !(await ensurePageAccess())) return;
     dom.btnSelectElement.disabled = true;
     dom.btnChangeElement.disabled = true;
     try {
-      const response = await sendCommand(MESSAGE.SELECT_ELEMENT, { draftId: state.draftId }, { timeoutMs: 120000 });
+      const response = await sendCommand(MESSAGE.SELECT_ELEMENT, {
+        draftId: state.draftId,
+        preferContextTarget
+      }, { timeoutMs: 120000 });
       if (isUnsupportedMessageResponse(response)) {
         await recoverOutdatedBackground();
         return;
       }
       if (!isSuccess(response)) throw responseError(response, 'Não foi possível selecionar o elemento.');
       state.diagnostics = response.diagnostics || state.diagnostics;
+      // Elemento novo: a anotação da prévia anterior não vale mais.
+      state.elementAnnotation = null;
       renderDiagnostics();
-      const attached = await attachElementPreview({ auto: true });
+      const attached = await attachElementPreview();
       showToast(attached ? 'Elemento associado ao relato, com imagem anexada.' : 'Elemento associado ao relato.', 'success');
+      // Próximo passo natural: o slider avança para a descrição.
+      goToStep(1);
     } catch (error) {
       if (!/cancelad/i.test(String(error?.message || error)) && !handlePermissionError(error)) {
         showToast(readableError(error), 'error');
@@ -1341,10 +1527,10 @@
   function restoreDraft(draft) {
     if (!draft || typeof draft !== 'object') {
       if (!dom.location.value) updateLocationSuggestion(state.tab && state.tab.url, state.tab && state.tab.title);
-      return;
+      return false;
     }
 
-    if (state.project && draft.projectId && draft.projectId !== state.project.id) return;
+    if (state.project && draft.projectId && draft.projectId !== state.project.id) return false;
     const item = draft.item || draft;
     state.draftId = draft.id || draft.draftId || state.draftId;
 
@@ -1356,6 +1542,11 @@
     setValueIfPresent(dom.pageUrl, item.page_url || item.pageUrl);
     setValueIfPresent(dom.authorName, draft.author && draft.author.name);
     setValueIfPresent(dom.authorEmail, draft.author && draft.author.email);
+    const typeRadio = PROBLEM_TYPE_EXAMPLES[draft.problemType]
+      && document.querySelector(`input[name="problemType"][value="${draft.problemType}"]`);
+    if (typeRadio) typeRadio.checked = true;
+    loadDescriptionFields();
+    renderProblemType();
 
     const responsibleId = item.responsible_id || item.responsibleId;
     if (responsibleId) ensureResponsibleOption(responsibleId, item.responsible_name || item.responsibleName);
@@ -1363,6 +1554,7 @@
 
     if (!state.media.length && draft.media) state.media = normalizeMediaCollection(draft.media);
     updateDescriptionCount();
+    return true;
   }
 
   function serializeDraft() {
@@ -1403,14 +1595,15 @@
       },
       media: state.media.map(stripUiMediaFields),
       attachment_ids: attachmentIds,
-      client_request_id: state.draftId
+      client_request_id: state.draftId,
+      // Só para o painel lembrar o exemplo escolhido; não vai para o item.
+      problemType: document.querySelector('input[name="problemType"]:checked')?.value || ''
     };
   }
 
   function fieldChanged() {
     scheduleDraftSave();
     updateSubmitState();
-    if (dom.location.value.trim()) dom.btnUseLocationSuggestion.classList.add('hidden');
   }
 
   function scheduleDraftSave() {
@@ -1432,6 +1625,11 @@
   }
 
   function updateDraftStatus(status) {
+    // Com reenvio agendado, a barra mostra a contagem em vez do rascunho.
+    if (state.submitRetry.timer) {
+      renderSubmitRetry();
+      return;
+    }
     dom.draftStatus.classList.toggle('is-saving', status !== 'saved');
     dom.draftStatus.textContent = status === 'saving'
       ? 'Salvando rascunho…'
@@ -1447,8 +1645,8 @@
     let field = null;
 
     if (!state.connected) message = 'Conecte um projeto antes de enviar.';
-    else if (!(state.diagnostics && state.diagnostics.element)) message = 'Selecione o elemento onde o problema acontece.';
-    else if (!item.description) { message = 'Descreva o problema encontrado.'; field = dom.description; }
+    else if (!(state.diagnostics && state.diagnostics.element)) { message = 'Selecione o elemento onde o problema acontece.'; field = dom.btnSelectElement; }
+    else if (descriptionIssue()) ({ message, field } = descriptionIssue());
     else if (!ENUMS.device.includes(item.device)) { message = 'Selecione um dispositivo válido.'; field = dom.device; }
     else if (!item.location) { message = 'Informe onde o problema aparece.'; field = dom.location; }
     else if (!isHttpUrl(item.page_url)) { message = 'Informe uma URL de página válida (HTTP ou HTTPS).'; field = dom.pageUrl; }
@@ -1456,27 +1654,683 @@
     else if (!ENUMS.status.includes(item.status)) { message = 'Selecione um status válido.'; field = dom.status; }
     else if (draft.author.email && !dom.authorEmail.validity.valid) { message = 'Revise o e-mail do autor.'; field = dom.authorEmail; }
 
-    if (options.focus && field) {
-      field.focus();
-      field.reportValidity?.();
-    }
-    return { valid: !message, message, draft };
+    if (options.focus) guideToIssue({ message, field });
+    return { valid: !message, message, draft, field };
   }
 
+  // Botões seguem clicáveis com pendências: o clique leva até o que falta, em
+  // vez de um botão desabilitado que não explica nada.
   function updateSubmitState() {
     const validation = validateDraft();
-    dom.validationHint.textContent = validation.valid ? 'Tudo pronto para enviar.' : validation.message;
-    dom.btnSubmit.disabled = state.submitting || isRecorderActive() || !validation.valid;
+    const issue = currentStepIssue(validation);
+    const lastStep = state.currentStep === STEP_LAST;
+    dom.validationHint.textContent = issue
+      ? issue.message
+      : lastStep ? 'Tudo pronto · Ctrl+Enter para enviar' : 'Etapa pronta · Ctrl+Enter para continuar';
+    dom.validationHint.classList.toggle('is-actionable', Boolean(issue && issue.field));
+    dom.validationHint.title = issue && issue.field ? 'Ir para o campo pendente' : '';
+    dom.btnSubmit.disabled = state.submitting || isRecorderActive();
+    dom.btnSubmit.classList.toggle('is-blocked', !validation.valid);
+    dom.btnSubmit.setAttribute('aria-disabled', String(!validation.valid));
+    dom.btnStepNext.disabled = isRecorderActive();
+    dom.btnStepNext.classList.toggle('is-blocked', Boolean(issue));
+    dom.btnStepNext.setAttribute('aria-disabled', String(Boolean(issue)));
+    dom.btnDiscardDraft.classList.toggle('hidden', state.submitting || !hasDraftContent());
+    renderSteps(validation);
   }
 
-  async function submitDraft() {
+  // --- Descartar o QA ---------------------------------------------------------
+
+  function hasDraftContent() {
+    return Boolean(
+      (state.diagnostics && state.diagnostics.element)
+      || state.media.length
+      || dom.description.value.trim()
+      || state.currentStep > 0
+    );
+  }
+
+  // Mesmo reset de depois de criar o item: apaga elemento, anexos locais,
+  // descrição e diagnóstico, e volta para a etapa 1. Autor, preferências do
+  // projeto e Local sugerido pela URL continuam.
+  async function discardDraft() {
     if (state.submitting) return;
-    const validation = validateDraft({ focus: true });
+    dom.btnDiscardConfirm.disabled = true;
+    try {
+      clearSubmitRetry();
+      await resetComposer();
+      dom.discardDialog.close();
+      showToast('QA descartado. Pronto para um novo registro.');
+    } finally {
+      dom.btnDiscardConfirm.disabled = false;
+    }
+  }
+
+  // --- Etapas (slider) --------------------------------------------------------
+
+  // [Local, Descrição, Detalhes]: cada etapa só conta como completa se as
+  // anteriores também estiverem.
+  function stepCompletion(validation = validateDraft()) {
+    const element = Boolean(state.diagnostics && state.diagnostics.element);
+    const describe = element && !descriptionIssue();
+    return [element, describe, describe && validation.valid];
+  }
+
+  function maxReachableStep(done = stepCompletion()) {
+    if (!done[0]) return 0;
+    return done[1] ? 2 : 1;
+  }
+
+  function stepOfField(field) {
+    const slide = field && field.closest && field.closest('.qa-slide');
+    return slide ? Number(slide.dataset.step) : 0;
+  }
+
+  // Pendência que impede sair da etapa atual; na última, qualquer pendência.
+  function currentStepIssue(validation = validateDraft()) {
+    if (validation.valid) return null;
+    const blocksHere = state.currentStep === STEP_LAST || stepOfField(validation.field) <= state.currentStep;
+    return blocksHere ? { message: validation.message, field: validation.field } : null;
+  }
+
+  // Avançar exige a etapa atual completa; voltar (stepper, "Voltar" ou
+  // "Editar" do resumo) é sempre livre.
+  function goToStep(index, { animate = true, focus = true } = {}) {
+    const target = Math.max(0, Math.min(STEP_LAST, index));
+    if (target > maxReachableStep()) return false;
+    const previous = state.currentStep;
+    state.currentStep = target;
+    if (!animate) {
+      dom.stepViewport.classList.add('no-motion');
+      requestAnimationFrame(() => requestAnimationFrame(() => dom.stepViewport.classList.remove('no-motion')));
+    }
+    updateSubmitState();
+    if (target !== previous) {
+      // Com o painel rolado para baixo, volta ao topo da nova etapa.
+      if (dom.stepper.getBoundingClientRect().top < 0) {
+        dom.stepper.scrollIntoView({ block: 'start', behavior: animate ? 'smooth' : 'auto' });
+      }
+      if (focus) setTimeout(() => focusStep(target), animate ? SLIDE_MS : 0);
+    }
+    return true;
+  }
+
+  function advanceStep() {
+    const issue = currentStepIssue();
+    if (issue) {
+      guideToIssue(issue);
+      showToast(issue.message, 'error');
+      return;
+    }
+    goToStep(state.currentStep + 1);
+  }
+
+  function focusStep(step) {
+    if (step !== state.currentStep) return;
+    if (step === 1) (descriptionIssue()?.field || activeDescriptionFields()[0]).focus({ preventScroll: true });
+    else if (step === 2 && !dom.location.value.trim()) dom.location.focus({ preventScroll: true });
+  }
+
+  function renderSteps(validation) {
+    const done = stepCompletion(validation);
+    // Se uma etapa anterior deixou de valer (ex.: elemento perdido), volta até ela.
+    state.currentStep = Math.min(state.currentStep, maxReachableStep(done));
+    const current = state.currentStep;
+    const reachable = maxReachableStep(done);
+
+    dom.stepTrack.style.transform = `translateX(calc(${-100 * current}% - ${current * STEP_GAP_PX}px))`;
+    dom.stepTrack.querySelectorAll('.qa-slide').forEach((slide) => {
+      const active = Number(slide.dataset.step) === current;
+      slide.classList.toggle('is-active', active);
+      slide.inert = !active;
+    });
+    dom.stepper.querySelectorAll('.stepper-item').forEach((item) => {
+      const step = Number(item.dataset.step);
+      item.classList.toggle('is-current', step === current);
+      item.classList.toggle('is-done', done[step] && step !== current);
+      item.disabled = step > reachable;
+      if (step === current) item.setAttribute('aria-current', 'step');
+      else item.removeAttribute('aria-current');
+    });
+    dom.stepperBar.style.width = `${(current / STEP_LAST) * 100}%`;
+    dom.btnStepBack.classList.toggle('hidden', current === 0);
+    dom.btnStepNext.classList.toggle('hidden', current === STEP_LAST);
+    dom.btnSubmit.classList.toggle('hidden', current !== STEP_LAST);
+    renderSummary();
+    syncSliderHeight();
+  }
+
+  // O viewport acompanha a altura da etapa visível (as outras ficam ao lado).
+  function syncSliderHeight() {
+    const active = dom.stepTrack.querySelector(`.qa-slide[data-step="${state.currentStep}"]`);
+    if (active) dom.stepViewport.style.height = `${active.offsetHeight}px`;
+  }
+
+  function renderSummary() {
+    const element = state.diagnostics && state.diagnostics.element;
+    dom.summaryElement.textContent = element ? describeElement(element) : '—';
+    const count = state.media.length;
+    dom.summaryMedia.textContent = count ? `${count} ${count === 1 ? 'arquivo' : 'arquivos'}` : 'Nenhum';
+    dom.summaryProblem.textContent = describeParts(dom.description.value).problem || '—';
+  }
+
+  function describeElement(element) {
+    const name = element.accessible_name && element.accessible_name !== '[REDACTED]' ? `${element.accessible_name} · ` : '';
+    return `${name}${element.selector || element.tag}`;
+  }
+
+  function guideToIssue(issue) {
+    if (!issue || !issue.field) return;
+    const { field } = issue;
+    const step = stepOfField(field);
+    const onOtherStep = step !== state.currentStep;
+    if (onOtherStep) goToStep(step, { focus: false });
+    setTimeout(() => {
+      guideToField(field);
+      if (field !== dom.btnSelectElement) field.reportValidity?.();
+    }, onOtherStep ? SLIDE_MS : 0);
+  }
+
+  function selectedProblemType() {
+    return document.querySelector('input[name="problemType"]:checked')?.value || '';
+  }
+
+  function isOtherProblemType() {
+    return selectedProblemType() === OTHER_PROBLEM_TYPE;
+  }
+
+  function activeDescriptionFields() {
+    return isOtherProblemType() ? [dom.descriptionOther] : [dom.descriptionProblem, dom.descriptionExpected];
+  }
+
+  // Monta o texto que vai para o item a partir dos campos visíveis.
+  function syncDescription() {
+    if (isOtherProblemType()) {
+      dom.description.value = dom.descriptionOther.value.trim();
+    } else {
+      const problem = dom.descriptionProblem.value.trim();
+      const expected = dom.descriptionExpected.value.trim();
+      dom.description.value = problem || expected
+        ? `${DESCRIPTION_LABELS.problem}\n${problem}\n\n${DESCRIPTION_LABELS.expected}\n${expected}`
+        : '';
+    }
+    updateDescriptionCount();
+  }
+
+  // Caminho inverso (rascunho restaurado): separa o texto salvo nos campos.
+  function loadDescriptionFields() {
+    const text = dom.description.value;
+    if (isOtherProblemType()) {
+      dom.descriptionOther.value = text;
+      return;
+    }
+    const parts = describeParts(text);
+    dom.descriptionProblem.value = parts.problem;
+    dom.descriptionExpected.value = parts.expected;
+  }
+
+  // Exemplo do tipo escolhido (não altera a descrição) e troca entre os dois
+  // campos e o campo livre de "Outros", levando o que já foi escrito.
+  function renderProblemType() {
+    const other = isOtherProblemType();
+    const switching = other !== dom.splitDescription.classList.contains('hidden');
+    // O texto muda de modo junto (o modo de saída é limpo para não reaparecer depois).
+    if (switching && other) {
+      if (!dom.descriptionOther.value.trim()) {
+        dom.descriptionOther.value = [dom.descriptionProblem.value.trim(), dom.descriptionExpected.value.trim()]
+          .filter(Boolean)
+          .join('\n\n');
+      }
+      dom.descriptionProblem.value = '';
+      dom.descriptionExpected.value = '';
+    } else if (switching) {
+      if (!dom.descriptionProblem.value.trim() && !dom.descriptionExpected.value.trim()) {
+        dom.descriptionProblem.value = dom.descriptionOther.value.trim();
+      }
+      dom.descriptionOther.value = '';
+    }
+    dom.splitDescription.classList.toggle('hidden', other);
+    dom.otherDescription.classList.toggle('hidden', !other);
+    dom.descriptionHelp.textContent = other
+      ? 'Use para dúvidas, sugestões e casos que não são um erro.'
+      : 'Os dois campos são obrigatórios e vão juntos na descrição do item.';
+    if (switching) {
+      syncDescription();
+      if (state.initialized) fieldChanged();
+    }
+
+    const example = PROBLEM_TYPE_EXAMPLES[selectedProblemType()];
+    dom.problemTypeExample.classList.toggle('hidden', !example);
+    if (!example) return;
+    dom.typeExampleProblemLabel.textContent = other ? 'Caso:' : 'Erro:';
+    dom.typeExampleProblem.textContent = example[0];
+    dom.typeExampleExpected.textContent = example[1];
+    dom.typeExampleExpectedRow.classList.toggle('hidden', !example[1]);
+    // Reinicia a animação de entrada a cada troca de tipo.
+    dom.problemTypeExample.classList.remove('is-entering');
+    void dom.problemTypeExample.offsetWidth;
+    dom.problemTypeExample.classList.add('is-entering');
+  }
+
+  // --- Preferências por projeto -----------------------------------------------
+
+  // Dispositivo e prioridade do último QA criado no projeto viram o padrão do
+  // próximo. A visualização Desktop/Mobile aberta continua tendo prioridade.
+  function applyProjectPrefs() {
+    const prefs = state.project && state.prefs[state.project.id];
+    if (!prefs) return;
+    if (!VIEWPORT_DEVICE[state.viewport]) setSelectValue(dom.device, prefs.device, ENUMS.device);
+    setSelectValue(dom.priority, prefs.priority, ENUMS.priority);
+  }
+
+  function saveProjectPrefs() {
+    const projectId = state.project && state.project.id;
+    if (!projectId) return;
+    state.prefs = { ...state.prefs, [projectId]: { device: dom.device.value, priority: dom.priority.value } };
+    void storageSet({ [STORAGE.PREFS]: state.prefs }).catch(() => undefined);
+  }
+
+  // --- Reenvio automático -------------------------------------------------------
+
+  // Erros de rede, tempo esgotado e 5xx/408/429 tentam de novo; validação,
+  // sessão e demais 4xx exigem ação da pessoa.
+  function isRetryableSubmitError(error) {
+    const code = String(error?.code || '');
+    if (['SESSION_EXPIRED', 'VALIDATION_ERROR', 'UNKNOWN_MESSAGE'].includes(code)) return false;
+    if (error?.retryable === false) return false;
+    const status = Number(error?.status || 0);
+    return !(status >= 400 && status < 500 && ![408, 429].includes(status));
+  }
+
+  function nextSubmitRetryDelay() {
+    return SUBMIT_RETRY_DELAYS_MS[state.submitRetry.attempt] || 0;
+  }
+
+  function armSubmitRetry(delay, attempt) {
+    clearTimeout(state.submitRetry.timer);
+    clearInterval(state.submitRetry.ticker);
+    const nextAt = Date.now() + delay;
+    state.submitRetry = {
+      attempt,
+      nextAt,
+      timer: setTimeout(() => submitDraft({ auto: true }), delay),
+      ticker: setInterval(renderSubmitRetry, 1000)
+    };
+    void storageSet({ [STORAGE.PENDING_SUBMIT]: { draftId: state.draftId, attempt, nextAt } }).catch(() => undefined);
+    renderSubmitRetry();
+    setSubmitBusy(state.submitting);
+  }
+
+  function clearSubmitRetry() {
+    const wasPending = Boolean(state.submitRetry.attempt);
+    clearTimeout(state.submitRetry.timer);
+    clearInterval(state.submitRetry.ticker);
+    state.submitRetry = { attempt: 0, nextAt: 0, timer: null, ticker: null };
+    if (!wasPending) return;
+    void storageRemove(STORAGE.PENDING_SUBMIT);
+    updateDraftStatus('saved');
+    if (!state.submitting) setSubmitBusy(false);
+  }
+
+  // Envio que falhou antes de o painel fechar continua de onde parou.
+  function resumePendingSubmit(pending) {
+    if (!pending || pending.draftId !== state.draftId) {
+      if (pending) void storageRemove(STORAGE.PENDING_SUBMIT);
+      return;
+    }
+    const attempt = Number(pending.attempt) || 1;
+    if (attempt > SUBMIT_RETRY_DELAYS_MS.length) return;
+    armSubmitRetry(Math.max(3000, Number(pending.nextAt || 0) - Date.now()), attempt);
+  }
+
+  function renderSubmitRetry() {
+    if (!state.submitRetry.timer) return;
+    const seconds = Math.max(0, Math.ceil((state.submitRetry.nextAt - Date.now()) / 1000));
+    dom.draftStatus.classList.add('is-saving');
+    dom.draftStatus.textContent = `Envio pendente · nova tentativa em ${seconds} s (${state.submitRetry.attempt}/${SUBMIT_RETRY_DELAYS_MS.length})`;
+  }
+
+  // --- QAs abertos na mesma página ---------------------------------------------
+
+  // Mesma regra do background (contador do ícone): host sem www + caminho.
+  function pageKey(url) {
+    try {
+      const parsed = new URL(url);
+      return `${parsed.hostname.replace(/^www\./, '')}${parsed.pathname.replace(/\/+$/, '') || '/'}`.toLowerCase();
+    } catch (error) {
+      return '';
+    }
+  }
+
+  function duplicateItems() {
+    const key = pageKey(dom.pageUrl.value || (state.tab && state.tab.url));
+    if (!key) return [];
+    return state.items.filter((item) => !CLOSED_STATUSES.includes(item.status) && pageKey(item.page_url) === key);
+  }
+
+  function renderDuplicates() {
+    const items = duplicateItems();
+    dom.duplicateNotice.classList.toggle('hidden', !items.length);
+    if (items.length) {
+      dom.duplicateTitle.textContent = items.length === 1
+        ? 'Já existe 1 QA aberto nesta página. Confira se não é o mesmo problema.'
+        : `Já existem ${items.length} QAs abertos nesta página. Confira se não é o mesmo problema.`;
+      dom.duplicateList.replaceChildren(...items.slice(0, 3).map((item) => {
+        const entry = element('li');
+        const status = element('span', 'qa-status', item.status || 'Pendente');
+        status.dataset.status = item.status || '';
+        const parts = describeParts(item.description);
+        const summary = String(parts.problem || item.description || 'Sem descrição.').split('\n')[0];
+        entry.append(status, element('span', 'duplicate-text', summary.length > 90 ? `${summary.slice(0, 89)}…` : summary));
+        return entry;
+      }));
+    }
+    syncSliderHeight();
+  }
+
+  function showDuplicatesInList() {
+    let path = '';
+    try {
+      path = new URL(dom.pageUrl.value || state.tab.url).pathname;
+    } catch (error) {
+      path = '';
+    }
+    dom.itemsStatusFilter.value = 'open';
+    dom.itemsSearch.value = path && path !== '/' ? path : '';
+    setActiveTab('list');
+    renderItems();
+  }
+
+  // --- Menu de contexto "Reportar este elemento" ------------------------------
+
+  async function consumePendingAction() {
+    let action = null;
+    try {
+      action = (await chrome.storage.session.get(STORAGE.PENDING_ACTION))[STORAGE.PENDING_ACTION] || null;
+      if (action) await chrome.storage.session.remove(STORAGE.PENDING_ACTION);
+    } catch (error) {
+      return false;
+    }
+    if (!action || action.type !== 'select-element') return false;
+    if (Date.now() - Number(action.at || 0) > PENDING_ACTION_MAX_AGE_MS) return false;
+    if (!state.connected || state.sessionExpired) return false;
+    if (state.coachIndex >= 0) finishCoach();
+    setActiveTab('compose');
+    goToStep(0, { focus: false });
+    void selectElement({ preferContextTarget: true });
+    return true;
+  }
+
+  // --- Anotação da prévia do elemento -------------------------------------------
+
+  function shownElementPreview(dataUrl) {
+    const annotation = state.elementAnnotation;
+    return annotation && annotation.source === dataUrl ? annotation.dataUrl : dataUrl;
+  }
+
+  // Anota sobre a imagem mostrada (já anotada, se houver); a chave continua
+  // sendo a prévia original, que é o que o diagnóstico guarda.
+  async function openAnnotator() {
+    const preview = state.diagnostics && state.diagnostics.elementPreview;
+    const source = preview && safePreviewUrl(preview.dataUrl);
+    if (!source) return;
+    const image = new Image();
+    image.src = shownElementPreview(source);
+    try {
+      await image.decode();
+    } catch (error) {
+      showToast('Não foi possível abrir a prévia para anotar.', 'error');
+      return;
+    }
+    dom.annotatorCanvas.width = image.naturalWidth;
+    dom.annotatorCanvas.height = image.naturalHeight;
+    state.annotator = {
+      image,
+      source,
+      shapes: [],
+      drawing: null,
+      tool: 'rect',
+      color: '#ff004b',
+      lineWidth: Math.max(3, Math.round(Math.max(image.naturalWidth, image.naturalHeight) / 160))
+    };
+    setAnnotatorOption('tool', 'rect');
+    setAnnotatorOption('color', '#ff004b');
+    drawAnnotation();
+    dom.annotator.showModal();
+  }
+
+  function setAnnotatorOption(key, value) {
+    if (!state.annotator) return;
+    state.annotator[key] = value;
+    const attribute = key === 'tool' ? 'data-tool' : 'data-color';
+    dom.annotator.querySelectorAll(`[${attribute}]`).forEach((button) => {
+      const active = button.getAttribute(attribute) === value;
+      button.classList.toggle('is-active', active);
+      button.setAttribute('aria-pressed', String(active));
+    });
+  }
+
+  function annotationPoint(event) {
+    const rect = dom.annotatorCanvas.getBoundingClientRect();
+    return {
+      x: (event.clientX - rect.left) * (dom.annotatorCanvas.width / rect.width),
+      y: (event.clientY - rect.top) * (dom.annotatorCanvas.height / rect.height)
+    };
+  }
+
+  function startAnnotationShape(event) {
+    const annotator = state.annotator;
+    if (!annotator || event.button !== 0) return;
+    dom.annotatorCanvas.setPointerCapture(event.pointerId);
+    const point = annotationPoint(event);
+    annotator.drawing = { tool: annotator.tool, color: annotator.color, width: annotator.lineWidth, points: [point, point] };
+    drawAnnotation();
+  }
+
+  function moveAnnotationShape(event) {
+    const drawing = state.annotator && state.annotator.drawing;
+    if (!drawing) return;
+    const point = annotationPoint(event);
+    if (drawing.tool === 'pen') drawing.points.push(point);
+    else drawing.points[1] = point;
+    drawAnnotation();
+  }
+
+  function endAnnotationShape() {
+    const annotator = state.annotator;
+    if (!annotator || !annotator.drawing) return;
+    const { points, tool } = annotator.drawing;
+    const [start, end] = [points[0], points[points.length - 1]];
+    // Clique sem arrastar não vira forma.
+    if (tool === 'pen' ? points.length > 2 : Math.hypot(end.x - start.x, end.y - start.y) > 4) {
+      annotator.shapes.push(annotator.drawing);
+    }
+    annotator.drawing = null;
+    drawAnnotation();
+  }
+
+  function undoAnnotation() {
+    if (!state.annotator) return;
+    state.annotator.shapes.pop();
+    drawAnnotation();
+  }
+
+  function drawAnnotation() {
+    const annotator = state.annotator;
+    if (!annotator) return;
+    const context = dom.annotatorCanvas.getContext('2d');
+    context.clearRect(0, 0, dom.annotatorCanvas.width, dom.annotatorCanvas.height);
+    context.drawImage(annotator.image, 0, 0);
+    [...annotator.shapes, annotator.drawing].filter(Boolean).forEach((shape) => drawShape(context, shape));
+    dom.btnAnnotatorUndo.disabled = !annotator.shapes.length;
+  }
+
+  function drawShape(context, shape) {
+    const [start] = shape.points;
+    const end = shape.points[shape.points.length - 1];
+    context.save();
+    context.strokeStyle = shape.color;
+    context.lineWidth = shape.width;
+    context.lineCap = 'round';
+    context.lineJoin = 'round';
+    context.beginPath();
+    if (shape.tool === 'rect') {
+      context.rect(Math.min(start.x, end.x), Math.min(start.y, end.y), Math.abs(end.x - start.x), Math.abs(end.y - start.y));
+    } else if (shape.tool === 'pen') {
+      context.moveTo(start.x, start.y);
+      shape.points.slice(1).forEach((point) => context.lineTo(point.x, point.y));
+    } else {
+      // Seta: haste + duas abas a 28° da direção, proporcionais ao traço.
+      const angle = Math.atan2(end.y - start.y, end.x - start.x);
+      const head = shape.width * 4.5;
+      context.moveTo(start.x, start.y);
+      context.lineTo(end.x, end.y);
+      [-0.5, 0.5].forEach((spread) => {
+        context.moveTo(end.x, end.y);
+        context.lineTo(end.x - head * Math.cos(angle + spread), end.y - head * Math.sin(angle + spread));
+      });
+    }
+    context.stroke();
+    context.restore();
+  }
+
+  // A versão anotada substitui a prévia anexada ao relato.
+  async function saveAnnotation() {
+    const annotator = state.annotator;
+    if (!annotator) return;
+    if (!annotator.shapes.length) {
+      dom.annotator.close();
+      return;
+    }
+    const dataUrl = dom.annotatorCanvas.toDataURL('image/png');
+    dom.btnAnnotatorSave.disabled = true;
+    try {
+      await removeAutoAttachedPreview();
+      const response = await sendCommand('WI_QA_SAVE_SCREENSHOT', { dataUrl, filePrefix: 'elemento' }, { timeoutMs: 20000 });
+      if (!isSuccess(response)) throw responseError(response, 'Não foi possível salvar a anotação.');
+      state.autoPreviewRecordingId = (response.media && response.media.recordingId) || '';
+      state.elementAnnotation = { source: annotator.source, dataUrl };
+      dom.annotator.close();
+      renderDiagnostics();
+      showToast('Anotação salva no relato.', 'success');
+    } catch (error) {
+      showToast(readableError(error), 'error');
+    } finally {
+      dom.btnAnnotatorSave.disabled = false;
+    }
+  }
+
+  // --- Guia de primeiro uso ---------------------------------------------------
+
+  const COACH_STEPS = Object.freeze([
+    {
+      target: () => dom.stepper,
+      title: 'Registro em 3 etapas',
+      text: 'Local, Descrição e Detalhes. Avance com Continuar e volte a qualquer etapa pelos números.'
+    },
+    {
+      target: () => dom.btnSelectElement,
+      title: 'Comece pelo elemento',
+      text: 'Clique em Selecionar elemento e depois no ponto da página com problema. A imagem dele já entra no relato e pode ser anotada.'
+    },
+    {
+      target: () => dom.btnPixelInspector,
+      title: 'Atalhos que poupam tempo',
+      text: 'Alt+Shift+S faz uma captura rápida, Ctrl+Enter avança ou envia, e o botão direito na página tem “Reportar este elemento”.'
+    }
+  ]);
+
+  function startCoach() {
+    setActiveTab('compose');
+    showCoachStep(0);
+  }
+
+  function showCoachStep(index) {
+    document.querySelector('.coach-target')?.classList.remove('coach-target');
+    if (index >= COACH_STEPS.length) {
+      finishCoach();
+      return;
+    }
+    state.coachIndex = index;
+    const step = COACH_STEPS[index];
+    dom.coachStep.textContent = `${index + 1} de ${COACH_STEPS.length}`;
+    dom.coachTitle.textContent = step.title;
+    dom.coachText.textContent = step.text;
+    dom.btnCoachNext.textContent = index === COACH_STEPS.length - 1 ? 'Começar' : 'Próximo';
+    dom.coach.classList.remove('hidden', 'is-entering');
+    void dom.coach.offsetWidth; // reinicia a animação a cada dica
+    dom.coach.classList.add('is-entering');
+    const target = step.target();
+    target.classList.add('coach-target');
+    target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    dom.btnCoachNext.focus({ preventScroll: true });
+  }
+
+  function finishCoach() {
+    document.querySelector('.coach-target')?.classList.remove('coach-target');
+    dom.coach.classList.add('hidden');
+    state.coachIndex = -1;
+    void storageSet({ [STORAGE.ONBOARDING_DONE]: true }).catch(() => undefined);
+  }
+
+  // Divide a descrição nos blocos do modelo. Sem os títulos (texto livre),
+  // tudo conta como o erro.
+  function describeParts(text) {
+    const value = String(text || '');
+    const problemAt = value.indexOf(DESCRIPTION_LABELS.problem);
+    const expectedAt = value.indexOf(DESCRIPTION_LABELS.expected);
+    if (problemAt === -1 && expectedAt === -1) {
+      return { structured: false, problem: value.trim(), expected: '' };
+    }
+    const block = (at, label, otherAt) => (at === -1
+      ? ''
+      : value.slice(at + label.length, otherAt > at ? otherAt : undefined).trim());
+    return {
+      structured: true,
+      problem: block(problemAt, DESCRIPTION_LABELS.problem, expectedAt),
+      expected: block(expectedAt, DESCRIPTION_LABELS.expected, problemAt)
+    };
+  }
+
+  // Erro e esperado são obrigatórios; em "Outros", só o campo livre.
+  function descriptionIssue() {
+    if (isOtherProblemType()) {
+      return dom.descriptionOther.value.trim()
+        ? null
+        : { field: dom.descriptionOther, message: 'Descreva o caso.' };
+    }
+    if (!dom.descriptionProblem.value.trim()) {
+      return { field: dom.descriptionProblem, message: 'Descreva qual erro está acontecendo.' };
+    }
+    if (!dom.descriptionExpected.value.trim()) {
+      return { field: dom.descriptionExpected, message: 'Descreva qual deveria ser o comportamento esperado.' };
+    }
+    return null;
+  }
+
+  function guideToField(field) {
+    if (!field) return;
+    field.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    field.focus({ preventScroll: true });
+    field.classList.remove('needs-attention');
+    void field.offsetWidth; // reinicia a animação
+    field.classList.add('needs-attention');
+    setTimeout(() => field.classList.remove('needs-attention'), 1500);
+  }
+
+  // auto: tentativa do reenvio automático (sem levar o foco aos campos).
+  async function submitDraft({ auto = false } = {}) {
+    if (state.submitting || isRecorderActive()) return;
+    const validation = validateDraft({ focus: !auto });
     if (!validation.valid) {
-      showToast(validation.message, 'error');
+      // Rascunho mudou e ficou inválido durante a espera: para e deixa revisar.
+      if (auto) clearSubmitRetry();
+      else showToast(validation.message, 'error');
       return;
     }
 
+    clearTimeout(state.submitRetry.timer);
+    state.submitRetry.timer = null;
     state.submitting = true;
     setSubmitBusy(true);
     await saveDraftNow();
@@ -1489,7 +2343,18 @@
       if (!isSuccess(response)) throw responseError(response, 'Não foi possível criar o item de QA.');
       handleItemCreated(response.item || (response.data && response.data.item) || response.payload || response);
     } catch (error) {
-      showToast(readableError(error), 'error');
+      // O client_request_id (draftId) torna o reenvio idempotente: o item não duplica.
+      const delay = isRetryableSubmitError(error) ? nextSubmitRetryDelay() : 0;
+      if (delay) {
+        armSubmitRetry(delay, state.submitRetry.attempt + 1);
+        showToast(`${readableError(error)} Nova tentativa automática em ${Math.round(delay / 1000)} s.`, 'error');
+      } else {
+        const exhausted = state.submitRetry.attempt >= SUBMIT_RETRY_DELAYS_MS.length;
+        clearSubmitRetry();
+        showToast(exhausted
+          ? `Não foi possível enviar depois de ${SUBMIT_RETRY_DELAYS_MS.length} tentativas. O rascunho está salvo; tente de novo.`
+          : readableError(error), 'error');
+      }
     } finally {
       state.submitting = false;
       setSubmitBusy(false);
@@ -1503,9 +2368,11 @@
     const id = item && String(item.id || item.itemId || item.qa_item_id || '');
     if (!item || (id && id === state.lastCreatedItemId)) return;
     state.lastCreatedItemId = id || makeId('item');
-    showToast('QA criado com sucesso.', 'success');
+    clearSubmitRetry();
+    saveProjectPrefs();
+    showToast('QA criado com sucesso.', 'success', { label: 'Ver itens', onClick: () => setActiveTab('list') });
     state.itemsFetchedAt = 0;
-    void resetComposer();
+    void resetComposer().then(() => loadItems());
   }
 
   async function resetComposer() {
@@ -1515,11 +2382,16 @@
     state.media = [];
     state.diagnostics = null;
     state.autoPreviewRecordingId = '';
+    // O próximo QA volta ao início do slider (renderAll desliza até a etapa 1).
+    state.currentStep = 0;
 
     dom.qaForm.reset();
+    renderProblemType();
     dom.device.value = VIEWPORT_DEVICE[state.viewport] || 'Desktop';
     dom.priority.value = 'Média';
     dom.status.value = 'Pendente';
+    applyProjectPrefs();
+    state.elementAnnotation = null;
     dom.pageUrl.value = (state.tab && state.tab.url) || '';
     dom.authorName.value = author.name;
     dom.authorEmail.value = author.email;
@@ -1585,6 +2457,10 @@
   }
 
   function handleStorageChanges(changes, areaName) {
+    if (areaName === 'session') {
+      if (changes[STORAGE.PENDING_ACTION]?.newValue && state.initialized) void consumePendingAction();
+      return;
+    }
     if (areaName !== 'local') return;
     let mediaChanged = false;
 
@@ -1854,6 +2730,8 @@
     dom.workspaceView.classList.remove('hidden');
     setActiveTab(state.activeTab);
     renderAll();
+    // Carrega a lista em segundo plano: alimenta o aviso de duplicados e o contador do ícone.
+    void loadItems();
   }
 
   function setActiveTab(tab) {
@@ -1948,6 +2826,7 @@
       state.itemsLoading = false;
       dom.btnRefreshItems.disabled = false;
       renderItems();
+      renderDuplicates();
     }
   }
 
@@ -1988,6 +2867,7 @@
       }
     }
 
+    renderAwaitingBanner();
     const items = filteredItems();
     dom.itemsSummary.textContent = state.items.length
       ? `${items.length} de ${state.items.length} ${state.items.length === 1 ? 'item' : 'itens'}`
@@ -2001,7 +2881,9 @@
   function renderItemCard(item) {
     const expanded = state.expandedItems.has(item.id);
     const card = element('article', 'qa-card');
+    const awaiting = item.status === AWAITING_STATUS && dom.itemsStatusFilter.value === AWAITING_STATUS;
     card.classList.toggle('is-expanded', expanded);
+    card.classList.toggle('is-awaiting', awaiting);
 
     const toggle = element('button', 'qa-card-toggle');
     toggle.type = 'button';
@@ -2013,7 +2895,7 @@
     });
 
     const top = element('div', 'qa-card-top');
-    const status = element('span', 'qa-status', item.status || 'Pendente');
+    const status = element('span', 'qa-status', awaiting ? 'Aguardando validação' : item.status || 'Pendente');
     status.dataset.status = item.status || '';
     const priority = element('span', 'qa-priority', item.priority || '');
     priority.dataset.priority = item.priority || '';
@@ -2022,11 +2904,11 @@
     const footerParts = [
       [item.device, item.location].filter(Boolean).join(' · '),
       item.created_by_name ? `por ${item.created_by_name}` : '',
-      item.image_urls.length ? `${item.image_urls.length} ${item.image_urls.length === 1 ? 'imagem' : 'imagens'}` : '',
+      imageCountLabel(visibleImages(item).length),
       item.comments.length ? `${item.comments.length} ${item.comments.length === 1 ? 'comentário' : 'comentários'}` : ''
     ].filter(Boolean);
     const footer = element('div', 'qa-card-footer');
-    footerParts.forEach((part) => footer.appendChild(element('span', '', part)));
+    footerParts.forEach((part) => footer.appendChild(element('span', /image(m|ns)$/.test(part) ? 'qa-image-count' : '', part)));
 
     toggle.append(top, element('p', 'qa-description', item.description || 'Sem descrição.'), footer);
     card.appendChild(toggle);
@@ -2037,7 +2919,7 @@
   function renderItemDetails(item) {
     const details = element('div', 'qa-card-details');
 
-    const images = item.image_urls.filter(isHttpUrl);
+    const images = visibleImages(item);
     if (images.length) {
       const thumbs = element('div', 'qa-thumbs');
       images.forEach((url, index) => {
@@ -2049,6 +2931,7 @@
         image.src = url;
         image.alt = `Imagem ${index + 1} do item`;
         image.loading = 'lazy';
+        image.addEventListener('error', () => hideBrokenImage(url, link, item), { once: true });
         link.appendChild(image);
         // Clique abre o visualizador; Ctrl/botão do meio mantém a nova aba.
         link.addEventListener('click', (event) => {
@@ -2065,7 +2948,9 @@
       details.appendChild(element('div', 'qa-card-footer', `Responsável: ${item.responsible_name}`));
     }
 
-    if (item.comments.length) {
+    // Itens Info têm a conversa completa no visualizador de comentários.
+    const infoItem = item.status === 'Info';
+    if (item.comments.length && !infoItem) {
       const list = element('ul', 'qa-comments');
       item.comments.forEach((comment) => {
         const entry = element('li');
@@ -2090,8 +2975,152 @@
     copy.type = 'button';
     copy.addEventListener('click', () => copyText(item.id, 'ID copiado.'));
     actions.appendChild(copy);
+
+    if (infoItem) {
+      const count = item.comments.length;
+      const comments = element('button', 'button button-secondary button-small',
+        count ? `Ver comentários (${count})` : 'Sem comentários');
+      comments.type = 'button';
+      comments.disabled = !count;
+      comments.addEventListener('click', () => openComments(item));
+      actions.prepend(comments);
+    }
+
+    if (item.status === AWAITING_STATUS) {
+      details.appendChild(element('p', 'qa-validation-hint', validationHintText(images.length)));
+      const confirming = state.confirmingItemId === item.id;
+      const completing = state.completingItemId === item.id;
+      const complete = element('button', `button button-primary button-small${confirming ? ' is-confirming' : ''}`,
+        completing ? 'Concluindo…' : confirming ? 'Confirmar conclusão' : 'Marcar como concluído');
+      complete.type = 'button';
+      complete.disabled = completing;
+      complete.addEventListener('click', () => requestCompleteItem(item));
+      actions.prepend(complete);
+    }
+
     details.appendChild(actions);
     return details;
+  }
+
+  function visibleImages(item) {
+    return item.image_urls.filter((url) => isHttpUrl(url) && !state.brokenImages.has(url));
+  }
+
+  function imageCountLabel(count) {
+    return count ? `${count} ${count === 1 ? 'imagem' : 'imagens'}` : '';
+  }
+
+  // Sem re-renderizar a lista: remove a miniatura, o bloco vazio e corrige a contagem.
+  function hideBrokenImage(url, link, item) {
+    state.brokenImages.add(url);
+    const card = link.closest('.qa-card');
+    const thumbs = link.parentElement;
+    link.remove();
+    if (thumbs && !thumbs.children.length) thumbs.remove();
+    const count = card && card.querySelector('.qa-image-count');
+    const remaining = visibleImages(item).length;
+    if (count) {
+      const label = imageCountLabel(remaining);
+      if (label) count.textContent = label;
+      else count.remove();
+    }
+    const hint = card && card.querySelector('.qa-validation-hint');
+    if (hint) hint.textContent = validationHintText(remaining);
+  }
+
+  function validationHintText(imageCount) {
+    return imageCount
+      ? 'Confira a página e as imagens. Se estiver tudo certo, conclua o item.'
+      : 'Confira a página. Se estiver tudo certo, conclua o item.';
+  }
+
+  function renderAwaitingBanner() {
+    const count = state.items.filter((item) => item.status === AWAITING_STATUS).length;
+    const onlyAwaiting = dom.itemsStatusFilter.value === AWAITING_STATUS;
+    dom.awaitingBanner.classList.toggle('hidden', !count);
+    dom.awaitingBanner.classList.toggle('is-filtering', onlyAwaiting);
+    if (!count) return;
+    dom.awaitingTitle.textContent = count === 1
+      ? '1 item aguardando validação'
+      : `${count} itens aguardando validação`;
+    dom.awaitingAction.textContent = onlyAwaiting
+      ? 'Mostrando só esses · toque para ver todos em aberto'
+      : 'Toque para ver só esses, em destaque';
+  }
+
+  // Itens em "Validação": quem conferiu a página e as imagens conclui pelo
+  // painel. Dois cliques (Marcar → Confirmar, em até 5 s) evitam engano.
+  function requestCompleteItem(item) {
+    if (state.completingItemId) return;
+    clearTimeout(state.confirmTimer);
+    if (state.confirmingItemId !== item.id) {
+      state.confirmingItemId = item.id;
+      state.confirmTimer = setTimeout(() => {
+        state.confirmingItemId = '';
+        renderItems();
+      }, 5000);
+      renderItems();
+      return;
+    }
+    state.confirmingItemId = '';
+    void completeItem(item);
+  }
+
+  async function completeItem(item) {
+    state.completingItemId = item.id;
+    renderItems();
+    try {
+      const response = await sendCommand(MESSAGE.COMPLETE_ITEM, {
+        itemId: item.id,
+        pageUrl: item.page_url
+      }, { timeoutMs: 20000 });
+      if (!isSuccess(response)) throw responseError(response, 'Não foi possível concluir o item.');
+      const target = state.items.find((entry) => entry.id === item.id);
+      if (target) target.status = (response.item && response.item.status) || 'Concluído';
+      state.expandedItems.delete(item.id);
+      showToast('Item marcado como concluído.', 'success');
+    } catch (error) {
+      showToast(readableError(error), 'error');
+    } finally {
+      state.completingItemId = '';
+      renderItems();
+      renderDuplicates();
+    }
+  }
+
+  // Conversa completa de um item Info: descrição e comentários em ordem,
+  // com autor e data/hora completas.
+  function openComments(item) {
+    const comments = [...item.comments].sort((a, b) => (Date.parse(a.created_at) || 0) - (Date.parse(b.created_at) || 0));
+    dom.commentsViewerMeta.textContent = [item.status, item.location, formatFullDate(item.created_at)].filter(Boolean).join(' · ');
+    dom.commentsViewerTitle.textContent = `${comments.length} ${comments.length === 1 ? 'comentário' : 'comentários'}`;
+    dom.commentsViewerDescription.textContent = item.description || 'Sem descrição.';
+    dom.commentsViewerList.replaceChildren(...comments.map((comment) => {
+      const entry = element('li', 'comment');
+      const head = element('div', 'comment-head');
+      const when = element('time', '', formatFullDate(comment.created_at));
+      when.dateTime = comment.created_at || '';
+      when.title = formatRelativeDate(comment.created_at);
+      head.append(element('strong', '', comment.author_name || 'Usuário'), when);
+      const content = element('div', 'comment-content');
+      content.append(head, element('p', 'comment-body', comment.body || ''));
+      entry.append(element('span', 'comment-avatar', initials(comment.author_name)), content);
+      return entry;
+    }));
+    dom.commentsViewer.showModal();
+    dom.commentsViewerList.lastElementChild?.scrollIntoView({ block: 'nearest' });
+  }
+
+  function formatFullDate(value) {
+    const time = Date.parse(value || '');
+    if (!Number.isFinite(time)) return '';
+    return new Date(time)
+      .toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+      .replace(', ', ' às ');
+  }
+
+  function initials(name) {
+    return String(name || '').trim().split(/\s+/).slice(0, 2).map((part) => part[0] || '').join('').toUpperCase() || '?';
   }
 
   function element(tag, className = '', text) {
@@ -2198,7 +3227,9 @@
   function setSubmitBusy(busy) {
     dom.btnSubmit.disabled = busy;
     dom.submitSpinner.classList.toggle('hidden', !busy);
-    dom.submitButtonLabel.textContent = busy ? 'Criando item…' : 'Criar item de QA';
+    dom.submitButtonLabel.textContent = busy
+      ? 'Criando item…'
+      : state.submitRetry.timer ? 'Tentar agora' : 'Criar item de QA';
   }
 
   function setCaptureButtonsDisabled(disabled) {
@@ -2228,14 +3259,24 @@
   // O mesmo erro costuma chegar pela resposta do comando e pelo broadcast
   // WI_QA_ERROR; mostra uma vez só.
   let lastToast = { message: '', at: 0 };
-  function showToast(message, type = 'default') {
+  function showToast(message, type = 'default', action = null) {
     if (message === lastToast.message && Date.now() - lastToast.at < 2000) return;
     lastToast = { message, at: Date.now() };
     const toast = document.createElement('div');
-    toast.className = `toast${type === 'error' ? ' is-error' : type === 'success' ? ' is-success' : ''}`;
-    toast.textContent = message;
+    toast.className = `toast${type === 'error' ? ' is-error' : type === 'success' ? ' is-success' : ''}${action ? ' has-action' : ''}`;
+    toast.appendChild(element('span', '', message));
+    if (action) {
+      const button = element('button', 'toast-action', action.label);
+      button.type = 'button';
+      button.addEventListener('click', () => {
+        toast.remove();
+        action.onClick();
+      });
+      toast.appendChild(button);
+    }
     dom.toastRegion.appendChild(toast);
-    setTimeout(() => toast.remove(), 4500);
+    // Erros e toasts com ação ficam mais tempo na tela para dar tempo de ler/agir.
+    setTimeout(() => toast.remove(), action || type === 'error' ? 7000 : 4500);
   }
 
   async function copyText(value, successMessage) {
@@ -2508,6 +3549,8 @@
     if (raw && typeof raw === 'object') {
       const error = new Error(raw.message || raw.code || fallback);
       error.code = raw.code || '';
+      error.status = Number(raw.status || 0);
+      error.retryable = raw.retryable;
       return error;
     }
     return new Error(raw || fallback);

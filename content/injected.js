@@ -27,6 +27,28 @@
     ['Ctrl+V', 'colar o design (ou arrastar o arquivo)'],
     ['Esc', 'soltar o elemento · sair'],
   ]);
+  // Ícones do Fiscal do Pixel (traço 24×24). Montados com createElementNS em
+  // vez de innerHTML para não esbarrar em CSP/Trusted Types da página.
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  const PIXEL_ICONS = Object.freeze({
+    inspect: ['M12 3v4M12 17v4M3 12h4M17 12h4', 'M7 12a5 5 0 1 0 10 0a5 5 0 1 0 -10 0'],
+    image: ['M4 5h16v14H4z', 'm4 16 5-5 4 4 2-2 5 5', 'M14 9a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0 -3 0'],
+    camera: ['M4 7.5h3l1.4-2h7.2l1.4 2h3v11H4z', 'M8.6 13a3.4 3.4 0 1 0 6.8 0a3.4 3.4 0 1 0 -6.8 0'],
+    help: ['M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0', 'M9.6 9.4a2.5 2.5 0 1 1 3.4 2.4c-.6.3-1 .8-1 1.5v.4', 'M12 17h.01'],
+    swap: ['M8 20V4m0 0L4.5 7.5M8 4l3.5 3.5', 'M16 4v16m0 0-3.5-3.5M16 20l3.5-3.5'],
+    close: ['m6 6 12 12M18 6 6 18'],
+    eye: ['M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z', 'M9.5 12a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0'],
+    eyeOff: ['M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z', 'M9.5 12a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0', 'M4 4l16 16'],
+    more: ['M5.5 12h.01M12 12h.01M18.5 12h.01'],
+  });
+  // Último elemento clicado com o botão direito, para o menu "Reportar este
+  // elemento" selecionar direto (o Chrome não informa o elemento no clique).
+  const CONTEXT_TARGET_MAX_AGE_MS = 60_000;
+  let lastContextTarget = null;
+  document.addEventListener('contextmenu', (event) => {
+    const target = event.composedPath()[0];
+    lastContextTarget = target instanceof Element ? { element: target, at: Date.now() } : null;
+  }, true);
   let recordingTimer = null;
   let activeCleanup = null;
   let diagnosticDraftId = '';
@@ -73,7 +95,7 @@
         sendResponse({ success: true });
         return false;
       case 'WI_QA_SELECT_ELEMENT':
-        selectElement()
+        selectElement({ preferContextTarget: Boolean(message.preferContextTarget) })
           .then((element) => sendResponse({ success: true, element }))
           .catch((error) => sendResponse({ success: false, error: error.message }));
         return true;
@@ -670,79 +692,96 @@
     const tip = element('div', 'pi-tip');
     tip.hidden = true;
 
+    // Barra principal enxuta (inspecionar, design, capturar, sair). Os controles
+    // do design só aparecem com um design carregado, e as ações raras ficam no
+    // menu "Mais". O status é um aviso que some sozinho.
     const dock = element('div', 'pi-dock');
+    const status = element('div', 'pi-status');
+    status.setAttribute('role', 'status');
+    status.setAttribute('aria-live', 'polite');
+    status.hidden = true;
+
     const toolbar = element('div', 'pi-toolbar');
     toolbar.setAttribute('role', 'toolbar');
     toolbar.setAttribute('aria-label', 'Fiscal do Pixel');
-    const title = element('div', 'pi-title');
-    const titleText = element('strong', '');
-    titleText.textContent = 'Fiscal do Pixel';
-    const viewOnly = element('span', 'pi-view-only');
-    viewOnly.textContent = 'Só visualização';
-    viewOnly.title = 'Nada aqui altera a página ou o item de QA. Só a captura de evidência anexa uma imagem ao rascunho.';
-    titleText.append(' ', viewOnly);
-    const status = element('span', 'pi-status');
-    status.setAttribute('role', 'status');
-    status.setAttribute('aria-live', 'polite');
-    title.append(titleText, status);
+    const title = element('span', 'pi-title');
+    title.textContent = 'Fiscal do Pixel';
+    title.title = 'Só visualização: nada aqui altera a página ou o item de QA. Só a captura anexa uma imagem ao rascunho.';
 
-    const inspectButton = makeButton('Inspecionar', 'pi-button pi-toggle');
-    inspectButton.title = 'Mostra medidas e tipografia no hover; clique fixa o elemento (I)';
-    const loadButton = makeButton('Carregar design', 'pi-button');
+    const inspectButton = iconButton(PIXEL_ICONS.inspect, 'Inspecionar', 'pi-button pi-toggle', true);
+    inspectButton.title = 'Medidas e tipografia no hover; clique fixa o elemento (I)';
+    const loadButton = iconButton(PIXEL_ICONS.image, 'Comparar com design', 'pi-button', true);
+    loadButton.title = 'PNG, JPG ou WebP exportado do Figma. Também dá para colar (Ctrl+V) ou arrastar o arquivo.';
     const fileInput = document.createElement('input');
     fileInput.type = 'file';
     fileInput.accept = 'image/png,image/jpeg,image/webp,image/gif,image/avif';
     fileInput.hidden = true;
-    const mainGroup = element('div', 'pi-group');
-    mainGroup.append(inspectButton, loadButton, fileInput);
+    const captureButton = iconButton(PIXEL_ICONS.camera, 'Capturar', 'pi-button pi-primary', true);
+    captureButton.title = 'Captura a tela como está e anexa ao rascunho do QA (P)';
+    const helpButton = iconButton(PIXEL_ICONS.help, 'Atalhos de teclado (?)', 'pi-button pi-icon');
+    helpButton.setAttribute('aria-expanded', 'false');
+    const dockButton = iconButton(PIXEL_ICONS.swap, 'Mover a barra para cima ou para baixo', 'pi-button pi-icon');
+    const closeButton = iconButton(PIXEL_ICONS.close, 'Sair do Fiscal do Pixel (Esc)', 'pi-button pi-icon');
+    toolbar.append(
+      title, element('span', 'pi-divider'),
+      inspectButton, loadButton, fileInput, captureButton,
+      element('span', 'pi-divider'), helpButton, dockButton, closeButton,
+    );
 
-    const referenceGroup = element('div', 'pi-group pi-reference');
-    const visibleButton = makeButton('Ocultar', 'pi-button');
-    visibleButton.title = 'Mostrar ou ocultar o design (H)';
+    const referenceGroup = element('div', 'pi-toolbar pi-reference');
+    referenceGroup.setAttribute('role', 'toolbar');
+    referenceGroup.setAttribute('aria-label', 'Controles do design');
+    const visibleButton = iconButton(PIXEL_ICONS.eye, 'Mostrar ou ocultar o design (H)', 'pi-button pi-icon');
     const opacityLabel = element('label', 'pi-range');
-    const opacityText = element('span', '');
-    opacityText.textContent = 'Opacidade';
+    opacityLabel.title = 'Opacidade do design (teclas 1–9 e 0)';
     const opacityInput = document.createElement('input');
     Object.assign(opacityInput, { type: 'range', min: '0', max: '100', step: '5' });
+    opacityInput.setAttribute('aria-label', 'Opacidade do design');
     const opacityValue = element('output', 'pi-mono');
-    opacityLabel.append(opacityText, opacityInput, opacityValue);
+    opacityLabel.append(opacityInput, opacityValue);
+    const differenceButton = makeButton('Diferença', 'pi-button pi-toggle');
+    differenceButton.title = 'Onde página e design coincidem fica preto; o que aparece é divergência (D)';
     const scaleSelect = document.createElement('select');
     scaleSelect.className = 'pi-select';
     scaleSelect.setAttribute('aria-label', 'Escala do export do design');
-    scaleSelect.title = 'Escala em que o design foi exportado (2x = retina)';
     [1, 2, 3, 4].forEach((value) => {
       const option = document.createElement('option');
       option.value = String(value);
       option.textContent = `${value}x`;
       scaleSelect.append(option);
     });
-    const differenceButton = makeButton('Diferença', 'pi-button pi-toggle');
-    differenceButton.title = 'Onde página e design coincidem fica preto; o que aparece é divergência (D)';
     const offsetLabel = element('span', 'pi-offset pi-mono');
     offsetLabel.title = 'Deslocamento do design · setas movem 1px, Shift+setas 10px';
-    const centerButton = makeButton('Centralizar', 'pi-button');
-    centerButton.title = 'Centralizar o design na horizontal (C)';
-    const resetButton = makeButton('Zerar', 'pi-button');
-    resetButton.title = 'Voltar o design para X 0 · Y 0 (R)';
-    const removeButton = makeButton('Remover', 'pi-button');
-    referenceGroup.append(visibleButton, opacityLabel, scaleSelect, differenceButton, offsetLabel, centerButton, resetButton, removeButton);
-
-    const actionGroup = element('div', 'pi-group');
-    const captureButton = makeButton('Capturar evidência', 'primary-button pi-capture');
-    captureButton.title = 'Captura a tela como está e anexa ao rascunho do QA (P)';
-    const helpButton = makeButton('?', 'pi-button pi-icon');
-    helpButton.setAttribute('aria-label', 'Atalhos de teclado');
-    helpButton.setAttribute('aria-expanded', 'false');
-    const dockButton = makeButton('⇅', 'pi-button pi-icon');
-    dockButton.setAttribute('aria-label', 'Mover a barra para o outro lado da tela');
-    dockButton.title = 'Mover a barra para cima ou para baixo';
-    const closeButton = makeButton('Sair', 'pi-button');
-    closeButton.title = 'Sair do Fiscal do Pixel (Esc)';
-    actionGroup.append(captureButton, helpButton, dockButton, closeButton);
-    toolbar.append(title, mainGroup, referenceGroup, actionGroup);
+    const moreWrap = element('div', 'pi-more');
+    const moreButton = iconButton(PIXEL_ICONS.more, 'Mais opções do design', 'pi-button pi-icon');
+    moreButton.setAttribute('aria-haspopup', 'menu');
+    moreButton.setAttribute('aria-expanded', 'false');
+    const moreMenu = element('div', 'pi-menu');
+    moreMenu.setAttribute('role', 'menu');
+    moreMenu.hidden = true;
+    const menuItem = (label, shortcut = '', extraClass = '') => {
+      const item = makeButton(label, `pi-menu-item ${extraClass}`.trim());
+      item.setAttribute('role', 'menuitem');
+      if (shortcut) {
+        const key = element('kbd', '');
+        key.textContent = shortcut;
+        item.append(key);
+      }
+      return item;
+    };
+    const centerButton = menuItem('Centralizar na horizontal', 'C');
+    const resetButton = menuItem('Zerar posição', 'R');
+    const swapButton = menuItem('Trocar design');
+    const removeButton = menuItem('Remover design', '', 'pi-danger');
+    moreMenu.append(centerButton, resetButton, swapButton, removeButton);
+    moreWrap.append(moreButton, moreMenu);
+    referenceGroup.append(visibleButton, opacityLabel, differenceButton, scaleSelect, offsetLabel, moreWrap);
 
     const help = element('div', 'pi-help');
     help.hidden = true;
+    const helpNote = element('p', 'pi-help-note');
+    helpNote.textContent = 'Só visualização: nada aqui altera a página ou o item de QA. Só “Capturar” anexa uma imagem ao rascunho.';
+    help.append(helpNote);
     const helpList = document.createElement('dl');
     PIXEL_SHORTCUTS.forEach(([keys, text]) => {
       const term = document.createElement('dt');
@@ -752,7 +791,7 @@
       helpList.append(term, description);
     });
     help.append(helpList);
-    dock.append(help, toolbar);
+    dock.append(status, help, referenceGroup, toolbar);
     shadow.append(extraStyle, boxes, tip, dock);
 
     const s = {
@@ -874,8 +913,9 @@
       size.textContent = `${formatPx(metrics.rect.width)} × ${formatPx(metrics.rect.height)}`;
       header.append(name, size);
 
+      // No hover só o essencial; a ficha completa aparece ao fixar o elemento.
       const specs = element('div', 'pi-specs');
-      pixelSpecRows(metrics).forEach((row) => {
+      (s.pinned ? pixelSpecRows(metrics) : pixelSummaryRows(metrics)).forEach((row) => {
         if (row.section) {
           const section = element('div', 'pi-section');
           section.textContent = row.section;
@@ -899,7 +939,7 @@
       if (!s.capturing) {
         const footer = element('div', 'pi-tip-footer');
         const note = element('span', '');
-        note.textContent = s.pinned ? 'Fixado · Esc solta' : 'Clique para fixar';
+        note.textContent = s.pinned ? 'Fixado · Esc solta' : 'Clique para ver todas as medidas';
         footer.append(note);
         if (s.pinned) {
           const copy = makeButton('Copiar specs', 'pi-button');
@@ -925,40 +965,45 @@
       tip.style.top = `${Math.round(top)}px`;
     };
 
-    const idleStatus = () => (s.image ? `${s.image.width}×${s.image.height}px · ${s.exportScale}x` : 'Cole (Ctrl+V) ou arraste o design');
-
-    const flash = (message, tone = '') => {
+    const flash = (message, tone = '', durationMs = 3500) => {
       status.textContent = message;
-      status.title = message;
       status.dataset.tone = tone;
+      status.hidden = false;
       window.clearTimeout(s.statusTimer);
       s.statusTimer = window.setTimeout(() => {
-        status.textContent = idleStatus();
-        status.title = '';
+        status.hidden = true;
         status.dataset.tone = '';
-      }, 3500);
+      }, durationMs);
+    };
+
+    const setMenu = (open) => {
+      moreMenu.hidden = !open;
+      moreButton.setAttribute('aria-expanded', String(open));
     };
 
     const syncToolbar = () => {
       inspectButton.classList.toggle('active', s.inspecting);
       inspectButton.setAttribute('aria-pressed', String(s.inspecting));
-      loadButton.textContent = s.image ? 'Trocar design' : 'Carregar design';
-      loadButton.title = s.image
-        ? `${s.imageName} · ${s.image.width}×${s.image.height}px`
-        : 'PNG, JPG ou WebP exportado do Figma. Também dá para colar (Ctrl+V) ou arrastar o arquivo.';
+      loadButton.hidden = Boolean(s.image);
       referenceGroup.hidden = !s.image;
-      visibleButton.textContent = s.visible ? 'Ocultar' : 'Mostrar';
+      if (!s.image) setMenu(false);
+      visibleButton.replaceChildren(svgIcon(s.visible ? PIXEL_ICONS.eye : PIXEL_ICONS.eyeOff));
+      visibleButton.classList.toggle('active', !s.visible);
       visibleButton.setAttribute('aria-pressed', String(!s.visible));
       const percent = Math.round(s.opacity * 100);
       opacityInput.value = String(percent);
       opacityInput.setAttribute('aria-valuetext', `${percent}%`);
       opacityValue.textContent = `${percent}%`;
       scaleSelect.value = String(s.exportScale);
+      scaleSelect.title = s.image
+        ? `Escala do export (2x = retina) · ${s.imageName} · ${s.image.width}×${s.image.height}px`
+        : '';
       differenceButton.classList.toggle('active', s.difference);
       differenceButton.setAttribute('aria-pressed', String(s.difference));
+      // Posição só aparece quando o design foi deslocado.
+      offsetLabel.hidden = !s.offsetX && !s.offsetY;
       offsetLabel.textContent = `X ${s.offsetX} · Y ${s.offsetY}`;
       dock.classList.toggle('at-top', s.dockTop);
-      if (!status.dataset.tone) status.textContent = idleStatus();
     };
 
     const update = () => {
@@ -1152,7 +1197,8 @@
     };
 
     const onEscape = () => {
-      if (!help.hidden) setHelp(false);
+      if (!moreMenu.hidden) setMenu(false);
+      else if (!help.hidden) setHelp(false);
       else if (s.pinned) {
         s.pinned = null;
         requestRender();
@@ -1281,11 +1327,22 @@
       void matchDesignViewport();
     });
     differenceButton.addEventListener('click', toggleDifference);
-    centerButton.addEventListener('click', centerReference);
-    resetButton.addEventListener('click', resetOffset);
-    removeButton.addEventListener('click', removeReference);
+    moreButton.addEventListener('click', () => setMenu(moreMenu.hidden));
+    // Itens do menu fecham o menu depois de agir.
+    [
+      [centerButton, centerReference],
+      [resetButton, resetOffset],
+      [swapButton, () => fileInput.click()],
+      [removeButton, removeReference],
+    ].forEach(([button, action]) => button.addEventListener('click', () => {
+      setMenu(false);
+      action();
+    }));
     captureButton.addEventListener('click', () => void capture());
-    helpButton.addEventListener('click', () => setHelp(help.hidden));
+    helpButton.addEventListener('click', () => {
+      setMenu(false);
+      setHelp(help.hidden);
+    });
     dockButton.addEventListener('click', () => {
       s.dockTop = !s.dockTop;
       update();
@@ -1306,6 +1363,7 @@
     bindContext();
     syncToolbar();
     inspectButton.focus();
+    flash('Passe o mouse para medir · clique para fixar · cole um design com Ctrl+V', '', 6000);
   }
 
   function measurePixelElement(target) {
@@ -1357,6 +1415,18 @@
       rows.push({ label: 'Espaçamento', value: metrics.font.letterSpacing });
     }
     rows.push({ label: 'Cor', value: colorLabel(metrics.color), swatch: metrics.color });
+    if (!isTransparentColor(metrics.background)) {
+      rows.push({ label: 'Fundo', value: colorLabel(metrics.background), swatch: metrics.background });
+    }
+    return rows;
+  }
+
+  function pixelSummaryRows(metrics) {
+    const family = String(metrics.font.family || '').split(',')[0].trim().replace(/^["']|["']$/g, '') || '—';
+    const rows = [
+      { label: 'Fonte', value: `${family} · ${formatPx(metrics.font.size)}px · ${metrics.font.weight}` },
+      { label: 'Cor', value: colorLabel(metrics.color), swatch: metrics.color },
+    ];
     if (!isTransparentColor(metrics.background)) {
       rows.push({ label: 'Fundo', value: colorLabel(metrics.background), swatch: metrics.background });
     }
@@ -1498,7 +1568,16 @@
     return output;
   }
 
-  function selectElement() {
+  function selectElement({ preferContextTarget = false } = {}) {
+    const recent = lastContextTarget;
+    lastContextTarget = null;
+    // Só na página inteira: dentro da visualização responsiva o clique
+    // direito acontece na moldura, fora deste documento.
+    if (preferContextTarget && !responsiveViewer && recent?.element.isConnected
+      && Date.now() - recent.at < CONTEXT_TARGET_MAX_AGE_MS) {
+      removeSurface();
+      return Promise.resolve(describeElement(recent.element, getElementSelectionContext()));
+    }
     return new Promise((resolve, reject) => {
       removeSurface();
       const selectionContext = getElementSelectionContext();
@@ -1674,6 +1753,33 @@
     return button;
   }
 
+  function svgIcon(paths) {
+    const svg = document.createElementNS(SVG_NS, 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('aria-hidden', 'true');
+    paths.forEach((d) => {
+      const path = document.createElementNS(SVG_NS, 'path');
+      path.setAttribute('d', d);
+      svg.append(path);
+    });
+    return svg;
+  }
+
+  // Sem showLabel o rótulo vira aria-label/tooltip (botão só com ícone).
+  function iconButton(paths, label, className, showLabel = false) {
+    const button = makeButton('', className);
+    button.append(svgIcon(paths));
+    if (showLabel) {
+      const text = document.createElement('span');
+      text.textContent = label;
+      button.append(text);
+    } else {
+      button.setAttribute('aria-label', label);
+    }
+    button.title = label;
+    return button;
+  }
+
   function delay(ms) {
     return new Promise((resolve) => window.setTimeout(resolve, ms));
   }
@@ -1743,31 +1849,44 @@
     .pi-swatch { flex:none; width:12px; height:12px; border-radius:3px; box-shadow:inset 0 0 0 1px rgba(255,255,255,.4); }
     .pi-tip-footer { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-top:8px; padding-top:8px; border-top:1px solid rgba(255,255,255,.1); color:#a1a1aa; font-size:11px; }
     .pi-tip-footer .pi-button { min-height:26px; padding:0 8px; font-size:11px; }
-    .pi-dock { position:fixed; left:50%; bottom:16px; display:flex; flex-direction:column; align-items:center; gap:8px; width:max-content; max-width:calc(100vw - 24px); transform:translateX(-50%); pointer-events:none; }
+    .pi-dock { position:fixed; left:50%; bottom:16px; display:flex; flex-direction:column; align-items:center; gap:8px; width:max-content; max-width:calc(100vw - 24px); transform:translateX(-50%); pointer-events:none; animation:pi-dock-rise 260ms cubic-bezier(.2,.8,.2,1); }
     .pi-dock.at-top { top:16px; bottom:auto; flex-direction:column-reverse; }
-    .pi-toolbar { display:flex; flex-wrap:wrap; align-items:center; justify-content:center; gap:8px 12px; max-width:100%; padding:8px 10px; border:1px solid rgba(255,255,255,.12); border-radius:12px; color:#fff; background:rgba(24,24,27,.96); box-shadow:0 14px 40px rgba(0,0,0,.32); font-size:12px; pointer-events:auto; }
-    .pi-title { display:grid; gap:1px; min-width:0; max-width:240px; }
-    .pi-title strong { font-size:12px; white-space:nowrap; }
-    .pi-view-only { margin-left:4px; padding:1px 6px; border:1px solid rgba(255,255,255,.2); border-radius:999px; color:#d4d4d8; font-size:10px; font-weight:600; vertical-align:1px; }
-    .pi-status { overflow:hidden; color:#a1a1aa; font-size:11px; text-overflow:ellipsis; white-space:nowrap; }
-    .pi-status[data-tone="success"] { color:#4ade80; }
-    .pi-status[data-tone="error"] { color:#fb7185; }
-    .pi-group { display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
-    .pi-reference { padding:0 12px; border-inline:1px solid rgba(255,255,255,.14); }
-    .pi-button { min-height:32px; padding:0 10px; border:1px solid rgba(255,255,255,.14); border-radius:8px; color:#fff; background:transparent; cursor:pointer; white-space:nowrap; }
-    .pi-button:hover { background:rgba(255,255,255,.1); }
-    .pi-toggle.active { border-color:rgba(255,0,75,.65); background:rgba(255,0,75,.22); }
+    .pi-toolbar { display:flex; align-items:center; gap:4px; max-width:100%; padding:5px; border:1px solid rgba(255,255,255,.1); border-radius:14px; color:#fff; background:rgba(24,24,27,.94); box-shadow:0 12px 36px rgba(0,0,0,.3); backdrop-filter:blur(10px); font-size:12px; pointer-events:auto; }
+    .pi-title { padding:0 8px 0 10px; color:#a1a1aa; font-size:11px; font-weight:650; letter-spacing:.02em; white-space:nowrap; cursor:help; }
+    .pi-divider { flex:none; width:1px; height:20px; margin:0 4px; background:rgba(255,255,255,.12); }
+    .pi-button { display:inline-flex; align-items:center; justify-content:center; gap:6px; min-height:32px; padding:0 10px; border:0; border-radius:9px; color:#e4e4e7; background:transparent; cursor:pointer; white-space:nowrap; transition:background-color 120ms ease, color 120ms ease; }
+    .pi-button:hover { color:#fff; background:rgba(255,255,255,.1); }
+    .pi-button svg { flex:none; width:16px; height:16px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }
+    .pi-toggle.active { color:#fff; background:rgba(255,0,75,.24); box-shadow:inset 0 0 0 1px rgba(255,0,75,.5); }
     .pi-icon { width:32px; padding:0; }
-    .pi-capture { min-height:32px; }
-    .pi-range { display:flex; align-items:center; gap:6px; color:#d4d4d8; }
-    .pi-range input { width:96px; accent-color:var(--brand); }
-    .pi-range output { min-width:34px; text-align:right; }
-    .pi-select { height:32px; padding:0 6px; border:1px solid rgba(255,255,255,.14); border-radius:8px; color:#fff; background:#27272a; font:inherit; cursor:pointer; }
-    .pi-offset { min-width:96px; color:#d4d4d8; text-align:center; }
-    .pi-help { width:min(440px,calc(100vw - 24px)); padding:12px 14px; border:1px solid rgba(255,255,255,.12); border-radius:12px; color:#fff; background:rgba(24,24,27,.96); box-shadow:0 14px 40px rgba(0,0,0,.32); font-size:12px; pointer-events:auto; }
+    .pi-icon.active { color:#ff7aa2; }
+    .pi-primary { color:#fff; background:var(--brand-dark); font-weight:650; }
+    .pi-primary:hover { background:#c9003b; }
+    .pi-reference { padding:4px 5px; border-radius:12px; animation:pi-rise 220ms cubic-bezier(.2,.8,.2,1); }
+    .pi-range { display:flex; align-items:center; gap:6px; padding:0 6px; color:#d4d4d8; }
+    .pi-range input { width:88px; accent-color:var(--brand); }
+    .pi-range output { min-width:34px; font-size:11px; text-align:right; }
+    .pi-select { height:30px; padding:0 4px; border:0; border-radius:8px; color:#e4e4e7; background:rgba(255,255,255,.08); font:inherit; cursor:pointer; }
+    .pi-offset { padding:0 6px; color:#a1a1aa; font-size:11px; }
+    .pi-more { position:relative; }
+    .pi-more .pi-icon svg { stroke-width:3.2; }
+    .pi-menu { position:absolute; right:0; bottom:calc(100% + 8px); display:grid; min-width:200px; padding:5px; border:1px solid rgba(255,255,255,.1); border-radius:12px; background:rgba(24,24,27,.98); box-shadow:0 14px 40px rgba(0,0,0,.36); animation:pi-pop 160ms ease-out; }
+    .at-top .pi-menu { top:calc(100% + 8px); bottom:auto; }
+    .pi-menu-item { display:flex; align-items:center; justify-content:space-between; gap:16px; min-height:32px; padding:0 10px; border:0; border-radius:8px; color:#e4e4e7; background:transparent; text-align:left; cursor:pointer; }
+    .pi-menu-item:hover { background:rgba(255,255,255,.08); }
+    .pi-menu-item kbd { color:#71717a; font:600 11px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    .pi-danger { color:#fb7185; }
+    .pi-status { max-width:min(460px,calc(100vw - 24px)); padding:7px 12px; border-radius:999px; color:#e4e4e7; background:rgba(24,24,27,.9); box-shadow:0 8px 24px rgba(0,0,0,.24); font-size:12px; text-align:center; pointer-events:none; animation:pi-pop 180ms ease-out; }
+    .pi-status[data-tone="success"] { color:#bbf7d0; background:rgba(22,101,52,.95); }
+    .pi-status[data-tone="error"] { color:#ffe4e6; background:rgba(159,18,57,.95); }
+    .pi-help { width:min(420px,calc(100vw - 24px)); padding:12px 14px; border:1px solid rgba(255,255,255,.1); border-radius:12px; color:#fff; background:rgba(24,24,27,.96); box-shadow:0 14px 40px rgba(0,0,0,.32); font-size:12px; pointer-events:auto; animation:pi-pop 160ms ease-out; }
+    .pi-help-note { margin:0 0 10px; padding-bottom:10px; border-bottom:1px solid rgba(255,255,255,.1); color:#a1a1aa; font-size:11px; line-height:1.4; }
     .pi-help dl { display:grid; grid-template-columns:auto 1fr; gap:6px 14px; margin:0; }
     .pi-help dt { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-weight:650; white-space:nowrap; }
     .pi-help dd { margin:0; color:#d4d4d8; }
-    @media (max-width:640px) { .pi-reference{padding:0;border:0}.pi-range input{width:72px} }
+    @keyframes pi-rise { from { opacity:0; transform:translateY(8px); } }
+    @keyframes pi-dock-rise { from { opacity:0; transform:translate(-50%,8px); } to { opacity:1; transform:translate(-50%,0); } }
+    @keyframes pi-pop { from { opacity:0; transform:scale(.96); } }
+    @media (max-width:640px) { .pi-toolbar .pi-button > span { display:none; } .pi-toolbar .pi-button:has(> span) { width:32px; padding:0; } .pi-title { display:none; } .pi-range input { width:64px; } }
   `;
 })();
