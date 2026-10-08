@@ -1,7 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
-  <title id="title">WiControl QA</title>
-  <desc id="desc">Símbolo Wicomm em preto com detalhe rosa.</desc>
-  <rect width="128" height="128" rx="30" fill="#ffffff"/>
-  <path d="M18 32v48a20 20 0 0 0 40 0V44h20v36a20 20 0 0 0 40 0V20" fill="none" stroke="#18181b" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M96 18h24v24" fill="none" stroke="#ff004b" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
-</svg>
